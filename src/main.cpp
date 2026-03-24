@@ -5,6 +5,7 @@
 
 #include "config_build.h"
 #include "config_pins.h"
+#include "ds18b20_sensor.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
 #include "ui_lcd.h"
@@ -24,6 +25,7 @@ bool g_was_watchdog_reset = false;
 UILCD lcd;
 KeypadInput keypad;
 AppStateMachine app;
+DS18B20Sensor tempSensor;
 
 namespace {
 #if ENABLE_SERIAL_DEBUG
@@ -63,6 +65,7 @@ void setup() {
 
   io.init();
 
+  tempSensor.init();
   lcd.init();
   keypad.init();
   app.init();
@@ -70,7 +73,7 @@ void setup() {
 #if ENABLE_SERIAL_DEBUG
   Serial.begin(115200);
   Serial.println();
-  Serial.println(F("Industrial Dryer Controller - Phase 2"));
+  Serial.println(F("Industrial Dryer Controller - Phase 3"));
   printResetFlags(g_reset_flags_mcusr);
 
   Serial.print(F("EEPROM CRC valid: "));
@@ -94,6 +97,7 @@ void loop() {
   static uint32_t last_io_ms = 0;
   static uint32_t last_app_ms = 0;
   static uint32_t last_lcd_ms = 0;
+  static uint32_t last_temp_ms = 0;
   static uint32_t last_slow_ms = 0;
   static bool last_door_closed = true;
 
@@ -129,6 +133,12 @@ void loop() {
     app.update();
   }
 
+  // DS18B20 state machine: 4 Hz (250ms)
+  if (now - last_temp_ms >= MEDIUM_LOOP_PERIOD) {
+    last_temp_ms = now;
+    tempSensor.update();
+  }
+
   // LCD refresh: >= 5 Hz (200ms)
   if (now - last_lcd_ms >= 200u) {
     last_lcd_ms = now;
@@ -139,6 +149,17 @@ void loop() {
   if (now - last_slow_ms >= SLOW_LOOP_PERIOD) {
     last_slow_ms = now;
     eepromStore.update(now);
+
+#if ENABLE_SERIAL_DEBUG
+    Serial.print(F("TEMP raw="));
+    Serial.print(tempSensor.getRawTemperature(), 2);
+    Serial.print(F("C filt="));
+    Serial.print(tempSensor.getTemperature(), 2);
+    Serial.print(F("C valid="));
+    Serial.print(tempSensor.isValid() ? F("Y") : F("N"));
+    Serial.print(F(" fault="));
+    Serial.println(tempSensor.getFaultCode());
+#endif
 
     // Heartbeat LED (visible progress on bench).
     digitalWrite(LED_BUILTIN, (digitalRead(LED_BUILTIN) == LOW) ? HIGH : LOW);

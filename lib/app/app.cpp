@@ -3,9 +3,11 @@
 #include <Arduino.h>
 
 #include "config_build.h"
+#include "ds18b20_sensor.h"
 #include "ui_lcd.h"
 
 extern UILCD lcd;
+extern DS18B20Sensor tempSensor;
 
 #ifndef ENABLE_SERIAL_DEBUG
 #define ENABLE_SERIAL_DEBUG 0
@@ -15,6 +17,7 @@ namespace {
 constexpr uint32_t kBootScreenDurationMs = 3000;
 constexpr uint32_t kServiceSeqTimeoutMs = 2000;
 constexpr uint32_t kInvalidKeyMsgMs = 800;
+constexpr uint32_t kIdleTempRefreshMs = 1000;
 } // namespace
 
 void AppStateMachine::init() {
@@ -26,6 +29,8 @@ void AppStateMachine::init() {
   state_.service_seq = 0;
   state_.service_seq_start_ms = 0;
   state_.invalid_key_until_ms = 0;
+  state_.last_temp_display_ms = 0;
+  state_.last_temp_valid = 0;
 
   onEnter_(SystemState::BOOT);
 }
@@ -62,6 +67,9 @@ void AppStateMachine::onEnter_(SystemState new_state) {
       break;
     case SystemState::IDLE:
       lcd.showMainMenu(state_.menu_selection);
+      state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
+      lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
+      state_.last_temp_display_ms = millis();
       break;
     case SystemState::SERVICE:
       lcd.clear();
@@ -136,6 +144,17 @@ void AppStateMachine::update() {
     restoreScreen_();
   }
 
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::IDLE) {
+    const uint8_t valid_now = tempSensor.isValid() ? 1u : 0u;
+    const bool validity_changed = (valid_now != state_.last_temp_valid);
+
+    if (validity_changed || (now - state_.last_temp_display_ms) >= kIdleTempRefreshMs) {
+      state_.last_temp_valid = valid_now;
+      state_.last_temp_display_ms = now;
+      lcd.showTemperature(tempSensor.getTemperature(), valid_now != 0u);
+    }
+  }
+
   if (state_.current_state == SystemState::BOOT) {
     if (now - state_.state_entry_time_ms >= kBootScreenDurationMs) {
       transitionTo(SystemState::IDLE);
@@ -194,12 +213,16 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       if (key == KeypadInput::Key::UP) {
         state_.menu_selection = (state_.menu_selection == 0u) ? 1u : 0u;
         lcd.showMainMenu(state_.menu_selection);
+        state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
+        lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
         return;
       }
 
       if (key == KeypadInput::Key::DOWN) {
         state_.menu_selection = (state_.menu_selection == 0u) ? 1u : 0u;
         lcd.showMainMenu(state_.menu_selection);
+        state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
+        lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
         return;
       }
 

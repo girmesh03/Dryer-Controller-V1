@@ -13,6 +13,7 @@ public:
 
   void showBootScreen();
   void showMainMenu(uint8_t selection);
+  void showTemperature(float temp_c, bool valid);
 
   void clear();
   void setCursor(uint8_t col, uint8_t row);
@@ -26,7 +27,9 @@ private:
   struct {
     uint8_t screen;
     uint8_t menu_selection;
+    int16_t last_temp_deci_c;
     uint8_t dirty : 1;
+    uint8_t temp_valid : 1;
   } state_;
 
   void renderBoot_();

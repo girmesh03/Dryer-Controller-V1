@@ -44,6 +44,8 @@ private:
     uint32_t service_seq_start_ms;
 
     uint32_t invalid_key_until_ms;
+    uint32_t last_temp_display_ms;
+    uint8_t last_temp_valid : 1;
   } state_;
 
   bool canTransition_(SystemState from, SystemState to) const;
@@ -56,4 +58,3 @@ private:
 };
 
 #endif
-
