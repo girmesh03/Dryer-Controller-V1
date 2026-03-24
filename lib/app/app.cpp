@@ -4,10 +4,12 @@
 
 #include "config_build.h"
 #include "ds18b20_sensor.h"
+#include "drum_control.h"
 #include "ui_lcd.h"
 
 extern UILCD lcd;
 extern DS18B20Sensor tempSensor;
+extern DrumControl drumControl;
 
 #ifndef ENABLE_SERIAL_DEBUG
 #define ENABLE_SERIAL_DEBUG 0
@@ -15,9 +17,15 @@ extern DS18B20Sensor tempSensor;
 
 namespace {
 constexpr uint32_t kBootScreenDurationMs = 3000;
-constexpr uint32_t kServiceSeqTimeoutMs = 2000;
+constexpr uint32_t kServiceSeqTimeoutMs = 5000;
 constexpr uint32_t kInvalidKeyMsgMs = 800;
 constexpr uint32_t kIdleTempRefreshMs = 1000;
+
+constexpr uint8_t kServiceViewMenu = 0u;
+constexpr uint8_t kServiceViewDrumTest = 1u;
+constexpr uint8_t kServiceViewPidView = 2u;
+constexpr uint8_t kServiceViewIoTest = 3u;
+constexpr uint8_t kServiceMenuItems = 3u;
 } // namespace
 
 void AppStateMachine::init() {
@@ -28,6 +36,9 @@ void AppStateMachine::init() {
   state_.menu_selection = 0;
   state_.service_seq = 0;
   state_.service_seq_start_ms = 0;
+  state_.service_menu_selection = 0;
+  state_.service_view = kServiceViewMenu;
+  state_.service_last_dir = 255u;
   state_.invalid_key_until_ms = 0;
   state_.last_temp_display_ms = 0;
   state_.last_temp_valid = 0;
@@ -72,11 +83,7 @@ void AppStateMachine::onEnter_(SystemState new_state) {
       state_.last_temp_display_ms = millis();
       break;
     case SystemState::SERVICE:
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print(F("SERVICE MENU"));
-      lcd.setCursor(0, 3);
-      lcd.print(F("B:EXIT"));
+      renderService_();
       break;
     case SystemState::PROGRAM_SELECT:
       lcd.clear();
@@ -102,7 +109,10 @@ void AppStateMachine::onEnter_(SystemState new_state) {
 }
 
 void AppStateMachine::onExit_(SystemState old_state) {
-  (void)old_state;
+  if (old_state == SystemState::SERVICE) {
+    // Safety: never leave service tools with the drum running.
+    drumControl.stop();
+  }
 }
 
 void AppStateMachine::transitionTo(SystemState new_state) {
@@ -136,6 +146,91 @@ void AppStateMachine::showInvalidKey_() {
   lcd.print(F("INVALID KEY"));
 }
 
+void AppStateMachine::renderService_() {
+  switch (state_.service_view) {
+    case kServiceViewMenu:
+      renderServiceMenu_();
+      break;
+    case kServiceViewDrumTest:
+      renderDrumTest_();
+      break;
+    case kServiceViewPidView:
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("PID VIEW"));
+      lcd.setCursor(0, 2);
+      lcd.print(F("TBD"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:BACK"));
+      break;
+    case kServiceViewIoTest:
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("I/O TEST"));
+      lcd.setCursor(0, 2);
+      lcd.print(F("TBD"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:BACK"));
+      break;
+    default:
+      state_.service_view = kServiceViewMenu;
+      renderServiceMenu_();
+      break;
+  }
+}
+
+void AppStateMachine::renderServiceMenu_() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("SERVICE MENU"));
+
+  lcd.setCursor(0, 1);
+  lcd.print((state_.service_menu_selection == 0u) ? F("> DRUM TEST") : F("  DRUM TEST"));
+  lcd.setCursor(0, 2);
+  lcd.print((state_.service_menu_selection == 1u) ? F("> PID VIEW") : F("  PID VIEW"));
+  lcd.setCursor(0, 3);
+  lcd.print((state_.service_menu_selection == 2u) ? F("> I/O TEST") : F("  I/O TEST"));
+}
+
+void AppStateMachine::updateDrumTestDirection_() {
+  const DrumControl::Direction dir = drumControl.getCurrentDirection();
+  const uint8_t dir_u = static_cast<uint8_t>(dir);
+  if (dir_u == state_.service_last_dir) {
+    return;
+  }
+  state_.service_last_dir = dir_u;
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("DIR: ")); // 5 chars
+
+  switch (dir) {
+    case DrumControl::Direction::FORWARD:
+      lcd.print(F("FORWARD"));
+      break;
+    case DrumControl::Direction::REVERSE:
+      lcd.print(F("REVERSE"));
+      break;
+    default:
+      lcd.print(F("STOPPED"));
+      break;
+  }
+
+  // Clear remainder of the line (20 chars total).
+  lcd.print(F("        "));
+}
+
+void AppStateMachine::renderDrumTest_() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("DRUM TEST"));
+
+  state_.service_last_dir = 255u;
+  updateDrumTestDirection_();
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("B:STOP"));
+}
+
 void AppStateMachine::update() {
   const uint32_t now = millis();
 
@@ -153,6 +248,11 @@ void AppStateMachine::update() {
       state_.last_temp_display_ms = now;
       lcd.showTemperature(tempSensor.getTemperature(), valid_now != 0u);
     }
+  }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewDrumTest) {
+    updateDrumTestDirection_();
   }
 
   if (state_.current_state == SystemState::BOOT) {
@@ -173,8 +273,22 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
   if (key == KeypadInput::Key::STOP) {
     state_.service_seq = 0u;
 
-    if (state_.current_state == SystemState::SERVICE || state_.current_state == SystemState::PROGRAM_SELECT ||
-        state_.current_state == SystemState::PARAM_EDIT) {
+    if (state_.current_state == SystemState::SERVICE) {
+      if (state_.service_view != kServiceViewMenu) {
+        // STOP acts as "back" inside service tools (and stops the drum test).
+        if (state_.service_view == kServiceViewDrumTest) {
+          drumControl.stop();
+        }
+        state_.service_view = kServiceViewMenu;
+        renderService_();
+        return;
+      }
+
+      transitionTo(SystemState::IDLE);
+      return;
+    }
+
+    if (state_.current_state == SystemState::PROGRAM_SELECT || state_.current_state == SystemState::PARAM_EDIT) {
       transitionTo(SystemState::IDLE);
       return;
     }
@@ -194,6 +308,7 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
         }
         if (state_.service_seq == 1u) {
           state_.service_seq = 2u;
+          state_.service_seq_start_ms = now;
           return;
         }
         state_.service_seq = 1u;
@@ -204,6 +319,8 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       if (key == KeypadInput::Key::OK && state_.service_seq == 2u &&
           (now - state_.service_seq_start_ms) <= kServiceSeqTimeoutMs) {
         state_.service_seq = 0u;
+        state_.service_menu_selection = 0u;
+        state_.service_view = kServiceViewMenu;
         transitionTo(SystemState::SERVICE);
         return;
       }
@@ -239,7 +356,44 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       return;
     }
 
-    case SystemState::SERVICE:
+    case SystemState::SERVICE: {
+      if (state_.service_view != kServiceViewMenu) {
+        showInvalidKey_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::UP) {
+        state_.service_menu_selection =
+            (state_.service_menu_selection == 0u) ? (kServiceMenuItems - 1u) : (state_.service_menu_selection - 1u);
+        renderServiceMenu_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::DOWN) {
+        state_.service_menu_selection =
+            static_cast<uint8_t>((state_.service_menu_selection + 1u) % kServiceMenuItems);
+        renderServiceMenu_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::OK) {
+        if (state_.service_menu_selection == 0u) {
+          drumControl.setPattern(50u, 50u, 5u);
+          drumControl.start();
+          state_.service_view = kServiceViewDrumTest;
+          renderService_();
+          return;
+        }
+
+        state_.service_view = (state_.service_menu_selection == 1u) ? kServiceViewPidView : kServiceViewIoTest;
+        renderService_();
+        return;
+      }
+
+      showInvalidKey_();
+      return;
+    }
+
     case SystemState::PROGRAM_SELECT:
     case SystemState::PARAM_EDIT:
       showInvalidKey_();

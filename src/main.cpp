@@ -6,6 +6,7 @@
 #include "config_build.h"
 #include "config_pins.h"
 #include "ds18b20_sensor.h"
+#include "drum_control.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
 #include "ui_lcd.h"
@@ -16,7 +17,7 @@
 #define ENABLE_SERIAL_DEBUG 0
 #endif
 
-static IOAbstraction io;
+IOAbstraction io;
 static EEPROMStore eepromStore;
 
 uint8_t g_reset_flags_mcusr = 0;
@@ -26,6 +27,7 @@ UILCD lcd;
 KeypadInput keypad;
 AppStateMachine app;
 DS18B20Sensor tempSensor;
+DrumControl drumControl;
 
 namespace {
 #if ENABLE_SERIAL_DEBUG
@@ -66,6 +68,7 @@ void setup() {
   io.init();
 
   tempSensor.init();
+  drumControl.init();
   lcd.init();
   keypad.init();
   app.init();
@@ -73,7 +76,7 @@ void setup() {
 #if ENABLE_SERIAL_DEBUG
   Serial.begin(115200);
   Serial.println();
-  Serial.println(F("Industrial Dryer Controller - Phase 3"));
+  Serial.println(F("Industrial Dryer Controller - Phase 4"));
   printResetFlags(g_reset_flags_mcusr);
 
   Serial.print(F("EEPROM CRC valid: "));
@@ -96,6 +99,7 @@ void loop() {
   static uint32_t last_keypad_ms = 0;
   static uint32_t last_io_ms = 0;
   static uint32_t last_app_ms = 0;
+  static uint32_t last_drum_ms = 0;
   static uint32_t last_lcd_ms = 0;
   static uint32_t last_temp_ms = 0;
   static uint32_t last_slow_ms = 0;
@@ -112,8 +116,8 @@ void loop() {
     }
   }
 
-  // IO loop: 10 Hz (100ms)
-  if (now - last_io_ms >= FAST_LOOP_PERIOD) {
+  // IO loop: 20 Hz (50ms) for door response; debounce remains >=50ms.
+  if (now - last_io_ms >= 50u) {
     last_io_ms = now;
     io.update();
 
@@ -131,6 +135,16 @@ void loop() {
   if (now - last_app_ms >= FAST_LOOP_PERIOD) {
     last_app_ms = now;
     app.update();
+  }
+
+  // Drum control: 10 Hz (100ms)
+  if (now - last_drum_ms >= FAST_LOOP_PERIOD) {
+    last_drum_ms = now;
+    drumControl.update();
+
+    const auto dir = drumControl.getCurrentDirection();
+    io.setMotorForward(dir == DrumControl::Direction::FORWARD);
+    io.setMotorReverse(dir == DrumControl::Direction::REVERSE);
   }
 
   // DS18B20 state machine: 4 Hz (250ms)

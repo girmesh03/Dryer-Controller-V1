@@ -42,6 +42,9 @@ private:
 
     uint8_t service_seq;
     uint32_t service_seq_start_ms;
+    uint8_t service_menu_selection;
+    uint8_t service_view;
+    uint8_t service_last_dir;
 
     uint32_t invalid_key_until_ms;
     uint32_t last_temp_display_ms;
@@ -55,6 +58,11 @@ private:
 
   void showInvalidKey_();
   void restoreScreen_();
+
+  void renderService_();
+  void renderServiceMenu_();
+  void renderDrumTest_();
+  void updateDrumTestDirection_();
 };
 
 #endif

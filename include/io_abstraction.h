@@ -6,7 +6,7 @@
 class IOAbstraction {
 public:
   void init();
-  void update(); // Call at 10 Hz (100ms)
+  void update(); // Call at >=10 Hz (≤100ms); 20 Hz recommended for door response
 
   // Inputs (debounced)
   bool isDoorClosed() const;
