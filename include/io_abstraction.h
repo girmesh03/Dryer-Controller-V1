@@ -6,7 +6,7 @@
 class IOAbstraction {
 public:
   void init();
-  void update(); // Call at 20 Hz (50ms)
+  void update(); // Call at 10 Hz (100ms)
 
   // Inputs (debounced)
   bool isDoorClosed() const;
@@ -29,21 +29,17 @@ public:
 
 private:
   struct {
-    uint32_t last_direction_change_ms;
     uint8_t door_stable_count;
     uint8_t output_mismatch_count;
-    uint8_t flags;
+    uint32_t last_direction_change_ms;
+
+    // Packed boolean flags (memory-optimized).
+    uint8_t door_state : 1;      // 1=closed, 0=open (debounced)
+    uint8_t door_raw_state : 1;  // last raw sampled state
+    uint8_t heater_state : 1;
+    uint8_t motor_fwd_state : 1;
+    uint8_t motor_rev_state : 1;
   } state_;
-
-  static constexpr uint8_t FLAG_DOOR_CLOSED = 1u << 0;
-  static constexpr uint8_t FLAG_DOOR_RAW_CLOSED = 1u << 1;
-  static constexpr uint8_t FLAG_HEATER_ON = 1u << 2;
-  static constexpr uint8_t FLAG_MOTOR_FWD_ON = 1u << 3;
-  static constexpr uint8_t FLAG_MOTOR_REV_ON = 1u << 4;
-
-  void setFlag(uint8_t flag, bool value);
-  bool getFlag(uint8_t flag) const;
 };
 
 #endif
-

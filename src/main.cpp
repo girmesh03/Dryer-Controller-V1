@@ -64,24 +64,19 @@ void setup() {
 }
 
 void loop() {
+  // Reset watchdog - must be called every loop iteration
   wdt_reset();
   const uint32_t now = millis();
 
   static uint32_t last_fast_ms = 0;
-  static uint32_t last_control_ms = 0;
   static uint32_t last_medium_ms = 0;
   static uint32_t last_slow_ms = 0;
   static bool last_door_closed = true;
 
-  // Fast tick: keypad + door (20 Hz). Phase 1 uses door debounce and safety stop.
-  if (now - last_fast_ms >= TICK_FAST_MS) {
+  // Fast loop: IO update (Phase 1 uses door debounce and safety stop).
+  if (now - last_fast_ms >= FAST_LOOP_PERIOD) {
     last_fast_ms = now;
     io.update();
-  }
-
-  // Control tick: baseline safety/control (10 Hz). Phase 1 reserved for future.
-  if (now - last_control_ms >= TICK_CONTROL_MS) {
-    last_control_ms = now;
 
     // Door state change reporting (useful for Phase 1 bench verification).
     const bool door_closed = io.isDoorClosed();
@@ -92,12 +87,12 @@ void loop() {
   }
 
   // Medium tick: sensors + UI (4 Hz). Phase 1 reserved for future modules.
-  if (now - last_medium_ms >= TICK_MEDIUM_MS) {
+  if (now - last_medium_ms >= MEDIUM_LOOP_PERIOD) {
     last_medium_ms = now;
   }
 
   // Slow tick: EEPROM deferred writes, diagnostics, heartbeat (1 Hz).
-  if (now - last_slow_ms >= TICK_SLOW_MS) {
+  if (now - last_slow_ms >= SLOW_LOOP_PERIOD) {
     last_slow_ms = now;
     eepromStore.update(now);
 
