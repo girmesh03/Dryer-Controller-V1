@@ -1,0 +1,10 @@
+{
+  "name": "io_abstraction",
+  "version": "0.0.0",
+  "frameworks": "arduino",
+  "platforms": "atmelavr",
+  "build": {
+    "srcDir": "."
+  }
+}
+
