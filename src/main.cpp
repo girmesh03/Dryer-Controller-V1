@@ -7,14 +7,26 @@
 #include "config_pins.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
+#include "ui_lcd.h"
+#include "keypad_input.h"
+#include "app.h"
+
+#ifndef ENABLE_SERIAL_DEBUG
+#define ENABLE_SERIAL_DEBUG 0
+#endif
 
 static IOAbstraction io;
 static EEPROMStore eepromStore;
 
-static uint8_t reset_flags_mcusr = 0;
-static bool was_watchdog_reset = false;
+uint8_t g_reset_flags_mcusr = 0;
+bool g_was_watchdog_reset = false;
+
+UILCD lcd;
+KeypadInput keypad;
+AppStateMachine app;
 
 namespace {
+#if ENABLE_SERIAL_DEBUG
 void printResetFlags(uint8_t flags) {
   Serial.print(F("RESET FLAGS (MCUSR)=0x"));
   Serial.println(flags, HEX);
@@ -37,26 +49,34 @@ void printResetFlags(uint8_t flags) {
     Serial.println(F("Reset cause: WATCHDOG"));
   }
 }
+#endif
 } // namespace
 
 void setup() {
   // Capture reset cause before clearing, and disable watchdog to avoid reset loops.
-  reset_flags_mcusr = MCUSR;
-  was_watchdog_reset = (reset_flags_mcusr & _BV(WDRF)) != 0;
+  g_reset_flags_mcusr = MCUSR;
+  g_was_watchdog_reset = (g_reset_flags_mcusr & _BV(WDRF)) != 0;
   MCUSR = 0;
   wdt_disable();
 
-  Serial.begin(115200);
-  Serial.println();
-  Serial.println(F("Industrial Dryer Controller - Phase 1"));
-  printResetFlags(reset_flags_mcusr);
-
   eepromStore.init();
-  Serial.print(F("EEPROM CRC valid: "));
-  Serial.println(eepromStore.isValid() ? F("YES") : F("NO"));
 
   io.init();
+
+  lcd.init();
+  keypad.init();
+  app.init();
+
+#if ENABLE_SERIAL_DEBUG
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println(F("Industrial Dryer Controller - Phase 2"));
+  printResetFlags(g_reset_flags_mcusr);
+
+  Serial.print(F("EEPROM CRC valid: "));
+  Serial.println(eepromStore.isValid() ? F("YES") : F("NO"));
   Serial.println(F("IO initialized: outputs forced OFF, door input pull-up enabled"));
+#endif
 
   pinMode(LED_BUILTIN, OUTPUT);
   digitalWrite(LED_BUILTIN, LOW);
@@ -70,27 +90,49 @@ void loop() {
   wdt_reset();
   const uint32_t now = millis();
 
-  static uint32_t last_fast_ms = 0;
-  static uint32_t last_medium_ms = 0;
+  static uint32_t last_keypad_ms = 0;
+  static uint32_t last_io_ms = 0;
+  static uint32_t last_app_ms = 0;
+  static uint32_t last_lcd_ms = 0;
   static uint32_t last_slow_ms = 0;
   static bool last_door_closed = true;
 
-  // Fast loop: IO update (Phase 1 uses door debounce and safety stop).
-  if (now - last_fast_ms >= FAST_LOOP_PERIOD) {
-    last_fast_ms = now;
+  // Keypad scan loop: 20 Hz (50ms)
+  if (now - last_keypad_ms >= 50u) {
+    last_keypad_ms = now;
+    keypad.update();
+
+    const auto key = keypad.getKey();
+    if (key != KeypadInput::Key::NONE) {
+      app.handleKeyPress(key);
+    }
+  }
+
+  // IO loop: 10 Hz (100ms)
+  if (now - last_io_ms >= FAST_LOOP_PERIOD) {
+    last_io_ms = now;
     io.update();
 
     // Door state change reporting (useful for Phase 1 bench verification).
     const bool door_closed = io.isDoorClosed();
     if (door_closed != last_door_closed) {
       last_door_closed = door_closed;
+#if ENABLE_SERIAL_DEBUG
       Serial.println(door_closed ? F("DOOR: CLOSED") : F("DOOR: OPEN"));
+#endif
     }
   }
 
-  // Medium tick: sensors + UI (4 Hz). Phase 1 reserved for future modules.
-  if (now - last_medium_ms >= MEDIUM_LOOP_PERIOD) {
-    last_medium_ms = now;
+  // App state machine: 10 Hz (100ms)
+  if (now - last_app_ms >= FAST_LOOP_PERIOD) {
+    last_app_ms = now;
+    app.update();
+  }
+
+  // LCD refresh: >= 5 Hz (200ms)
+  if (now - last_lcd_ms >= 200u) {
+    last_lcd_ms = now;
+    lcd.update();
   }
 
   // Slow tick: EEPROM deferred writes, diagnostics, heartbeat (1 Hz).
