@@ -1,8 +1,20 @@
-Import("env")
-
 import os
 import subprocess
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    # SCons injects these at runtime. Declare stubs for IDEs/type-checkers.
+    def Import(name: str) -> None: ...
+    env: Any
+else:
+    # NOTE: This script is executed by PlatformIO/SCons.
+    # - `Import` and `env` are injected by SCons at runtime.
+    # - The stubs/guards below keep IDEs/type-checkers quiet without changing behavior.
+    env: Any = None
+    try:
+        Import("env")  # type: ignore[name-defined]  # noqa: F821
+    except NameError:
+        pass
 
 FLASH_TOTAL = 30720  # 30 KB usable after bootloader
 SRAM_TOTAL = 2048
@@ -21,6 +33,8 @@ def _move_flag_to_cxx_only(flag):
     # PlatformIO applies build_flags to both C and C++. Some flags are C++-only
     # (e.g., -fno-rtti) and will emit warnings for C sources. Move them to
     # CXXFLAGS so we still get the intended size savings without noisy builds.
+    if env is None:
+        return
     for key in ("CCFLAGS", "CFLAGS"):
         if key in env:
             env[key] = [f for f in env[key] if f != flag]
@@ -29,7 +43,8 @@ def _move_flag_to_cxx_only(flag):
 
 _move_flag_to_cxx_only("-fno-rtti")
 _move_flag_to_cxx_only("-fno-exceptions")
-env.Append(CXXFLAGS=["-fno-threadsafe-statics"])
+if env is not None:
+    env.Append(CXXFLAGS=["-fno-threadsafe-statics"])
 
 
 def _write_generated_header(project_dir, flash_used, sram_used):
@@ -142,4 +157,5 @@ def check_memory_usage(source, target, env):
     _write_generated_header(project_dir, flash_used, sram_used)
 
 
-env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", check_memory_usage)
+if env is not None:
+    env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", check_memory_usage)
