@@ -12,6 +12,7 @@ static IOAbstraction io;
 static EEPROMStore eepromStore;
 
 static uint8_t reset_flags_mcusr = 0;
+static bool was_watchdog_reset = false;
 
 namespace {
 void printResetFlags(uint8_t flags) {
@@ -41,6 +42,7 @@ void printResetFlags(uint8_t flags) {
 void setup() {
   // Capture reset cause before clearing, and disable watchdog to avoid reset loops.
   reset_flags_mcusr = MCUSR;
+  was_watchdog_reset = (reset_flags_mcusr & _BV(WDRF)) != 0;
   MCUSR = 0;
   wdt_disable();
 
