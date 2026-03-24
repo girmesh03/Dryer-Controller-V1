@@ -17,6 +17,20 @@ SRAM_WARN = 1536     # 75% of 2 KB
 
 EEPROM_USED = 512    # Bytes reserved by our EEPROM map (Appendix D)
 
+def _move_flag_to_cxx_only(flag):
+    # PlatformIO applies build_flags to both C and C++. Some flags are C++-only
+    # (e.g., -fno-rtti) and will emit warnings for C sources. Move them to
+    # CXXFLAGS so we still get the intended size savings without noisy builds.
+    for key in ("CCFLAGS", "CFLAGS"):
+        if key in env:
+            env[key] = [f for f in env[key] if f != flag]
+    env.Append(CXXFLAGS=[flag])
+
+
+_move_flag_to_cxx_only("-fno-rtti")
+_move_flag_to_cxx_only("-fno-exceptions")
+env.Append(CXXFLAGS=["-fno-threadsafe-statics"])
+
 
 def _write_generated_header(project_dir, flash_used, sram_used):
     out_dir = os.path.join(project_dir, "include", "generated")
@@ -129,4 +143,3 @@ def check_memory_usage(source, target, env):
 
 
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", check_memory_usage)
-
