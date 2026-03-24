@@ -5,3 +5,5 @@
 .vscode/ipch
 .kiro
 docs/
+include/generated/
+__pycache__/
