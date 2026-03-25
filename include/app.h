@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 
+#include "config_build.h"
 #include "keypad_input.h"
 
 enum class SystemState : uint8_t {
@@ -40,6 +41,7 @@ private:
 
     uint8_t menu_selection;
 
+#if ENABLE_SERVICE_MENU
     uint8_t service_seq;
     uint32_t service_seq_start_ms;
     uint8_t service_menu_selection;
@@ -48,6 +50,8 @@ private:
     uint8_t heater_test_duty;
     uint8_t service_last_heater_duty;
     uint8_t service_last_heater_on;
+    uint32_t service_pid_last_update_ms;
+#endif
 
     uint32_t invalid_key_until_ms;
     uint32_t last_temp_display_ms;
@@ -62,12 +66,16 @@ private:
   void showInvalidKey_();
   void restoreScreen_();
 
+#if ENABLE_SERVICE_MENU
   void renderService_();
   void renderServiceMenu_();
   void renderDrumTest_();
   void updateDrumTestDirection_();
   void renderHeaterTest_();
   void updateHeaterTestStatus_();
+  void renderPidView_();
+  void updatePidView_();
+#endif
 };
 
 #endif

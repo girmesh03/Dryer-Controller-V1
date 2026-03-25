@@ -8,6 +8,7 @@
 #include "ds18b20_sensor.h"
 #include "drum_control.h"
 #include "heater_control.h"
+#include "pid_control.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
 #include "ui_lcd.h"
@@ -28,7 +29,9 @@ bool g_was_watchdog_reset = false;
 uint8_t g_has_fault = 0u;
 
 // Phase 5 service-mode flag for HEATER TEST.
+#if ENABLE_SERVICE_MENU
 uint8_t g_heater_test_active = 0u;
+#endif
 
 // Phase 6+ will manage this setpoint during RUNNING_HEAT.
 float g_setpoint_c = 0.0f;
@@ -39,6 +42,7 @@ AppStateMachine app;
 DS18B20Sensor tempSensor;
 DrumControl drumControl;
 HeaterControl heaterControl;
+PIDControl pidController;
 
 namespace {
 #if ENABLE_SERIAL_DEBUG
@@ -78,6 +82,16 @@ void setup() {
 
   io.init();
 
+  pidController.init();
+  {
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (eepromStore.loadPIDGains(kp, ki, kd)) {
+      pidController.setTunings(kp, ki, kd);
+    }
+  }
+
   tempSensor.init();
   drumControl.init();
   heaterControl.init();
@@ -88,7 +102,7 @@ void setup() {
 #if ENABLE_SERIAL_DEBUG
   Serial.begin(115200);
   Serial.println();
-  Serial.println(F("Industrial Dryer Controller - Phase 5"));
+  Serial.println(F("Industrial Dryer Controller - Phase 6"));
   printResetFlags(g_reset_flags_mcusr);
 
   Serial.print(F("EEPROM CRC valid: "));
@@ -163,6 +177,14 @@ void loop() {
   // Heater control: 10 Hz (100ms)
   if (now - last_heater_ms >= FAST_LOOP_PERIOD) {
     last_heater_ms = now;
+
+    if (tempSensor.isValid() && app.getCurrentState() == SystemState::RUNNING_HEAT) {
+      const float temp_c = tempSensor.getTemperature();
+      const float pid_out = pidController.compute(temp_c); // 0-100%
+      g_setpoint_c = pidController.getTargetSetpoint();
+      heaterControl.setDutyCycle(pid_out);
+    }
+
     heaterControl.update();
     io.setHeaterRelay(heaterControl.isHeaterOn());
   }

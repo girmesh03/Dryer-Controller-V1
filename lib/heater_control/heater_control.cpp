@@ -15,7 +15,9 @@ extern AppStateMachine app;
 extern uint8_t g_has_fault;
 
 // Set by the SERVICE -> HEATER TEST screen (Phase 5).
+#if ENABLE_SERVICE_MENU
 extern uint8_t g_heater_test_active;
+#endif
 
 // Phase 6+ will set this when RUNNING_HEAT is implemented.
 extern float g_setpoint_c;
@@ -130,7 +132,11 @@ bool HeaterControl::canEnergizeHeater_() const {
   }
 
   const SystemState st = app.getCurrentState();
+#if ENABLE_SERVICE_MENU
   const bool in_heater_test = (st == SystemState::SERVICE) && (g_heater_test_active != 0u);
+#else
+  const bool in_heater_test = false;
+#endif
   const bool in_running_heat = (st == SystemState::RUNNING_HEAT);
 
   if (!in_heater_test && !in_running_heat) {
