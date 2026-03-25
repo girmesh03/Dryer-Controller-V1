@@ -11,6 +11,33 @@
 #define ENABLE_SERVICE_MENU 1
 #endif
 
+// Granular Service feature flags (compile-time)
+//  - These allow compiling only the service tools you need for a given bench session.
+//  - Override from PlatformIO build_flags, e.g. -DENABLE_SERVICE_FOPDT_ID=1
+#if ENABLE_SERVICE_MENU
+#ifndef ENABLE_SERVICE_DRUM_TEST
+#define ENABLE_SERVICE_DRUM_TEST 1
+#endif
+#ifndef ENABLE_SERVICE_HEATER_TEST
+#define ENABLE_SERVICE_HEATER_TEST 1
+#endif
+#ifndef ENABLE_SERVICE_PID_VIEW
+#define ENABLE_SERVICE_PID_VIEW 1
+#endif
+#ifndef ENABLE_SERVICE_IO_TEST
+#define ENABLE_SERVICE_IO_TEST 1
+#endif
+#ifndef ENABLE_SERVICE_FOPDT_ID
+#define ENABLE_SERVICE_FOPDT_ID 1
+#endif
+#else
+#define ENABLE_SERVICE_DRUM_TEST 0
+#define ENABLE_SERVICE_HEATER_TEST 0
+#define ENABLE_SERVICE_PID_VIEW 0
+#define ENABLE_SERVICE_IO_TEST 0
+#define ENABLE_SERVICE_FOPDT_ID 0
+#endif
+
 // Firmware identification (store in Flash / PROGMEM)
 constexpr char FW_VERSION[] PROGMEM = "1.0.0";
 constexpr char BUILD_DATE[] PROGMEM = __DATE__;

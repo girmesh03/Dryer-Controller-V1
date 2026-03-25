@@ -16,6 +16,7 @@ public:
 
   // FOPDT parameters (K, tau, L)
   bool loadFOPDT(float& k, float& tau, float& l) const;
+  void storeFOPDT(float k, float tau, float l);
   void requestSaveFOPDT(float k, float tau, float l);
 
   // Factory reset of reserved EEPROM map
@@ -68,4 +69,3 @@ private:
 };
 
 #endif
-

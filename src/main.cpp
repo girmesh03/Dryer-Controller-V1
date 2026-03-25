@@ -14,13 +14,16 @@
 #include "ui_lcd.h"
 #include "keypad_input.h"
 #include "app.h"
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+#include "fopdt_model.h"
+#endif
 
 #ifndef ENABLE_SERIAL_DEBUG
 #define ENABLE_SERIAL_DEBUG 0
 #endif
 
 IOAbstraction io;
-static EEPROMStore eepromStore;
+EEPROMStore eepromStore;
 
 uint8_t g_reset_flags_mcusr = 0;
 bool g_was_watchdog_reset = false;
@@ -29,8 +32,11 @@ bool g_was_watchdog_reset = false;
 uint8_t g_has_fault = 0u;
 
 // Phase 5 service-mode flag for HEATER TEST.
-#if ENABLE_SERVICE_MENU
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_HEATER_TEST
 uint8_t g_heater_test_active = 0u;
+#endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+uint8_t g_fopdt_active = 0u;
 #endif
 
 // Phase 6+ will manage this setpoint during RUNNING_HEAT.
@@ -43,6 +49,9 @@ DS18B20Sensor tempSensor;
 DrumControl drumControl;
 HeaterControl heaterControl;
 PIDControl pidController;
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+FOPDTModel fopdt;
+#endif
 
 namespace {
 #if ENABLE_SERIAL_DEBUG
@@ -79,6 +88,15 @@ void setup() {
   wdt_disable();
 
   eepromStore.init();
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+  // Phase 7.4: load persisted FOPDT parameters (even if not used immediately).
+  {
+    float k = 0.0f;
+    float tau = 0.0f;
+    float l = 0.0f;
+    (void)eepromStore.loadFOPDT(k, tau, l);
+  }
+#endif
 
   io.init();
 
@@ -95,6 +113,9 @@ void setup() {
   tempSensor.init();
   drumControl.init();
   heaterControl.init();
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+  fopdt.init();
+#endif
   lcd.init();
   keypad.init();
   app.init();

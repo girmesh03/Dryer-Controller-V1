@@ -14,9 +14,12 @@ extern AppStateMachine app;
 // Phase 10 will replace these placeholders with the real fault system.
 extern uint8_t g_has_fault;
 
-// Set by the SERVICE -> HEATER TEST screen (Phase 5).
-#if ENABLE_SERVICE_MENU
+// Set by service screens (Phase 5+).
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_HEATER_TEST
 extern uint8_t g_heater_test_active;
+#endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+extern uint8_t g_fopdt_active;
 #endif
 
 // Phase 6+ will set this when RUNNING_HEAT is implemented.
@@ -132,14 +135,19 @@ bool HeaterControl::canEnergizeHeater_() const {
   }
 
   const SystemState st = app.getCurrentState();
-#if ENABLE_SERVICE_MENU
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_HEATER_TEST
   const bool in_heater_test = (st == SystemState::SERVICE) && (g_heater_test_active != 0u);
 #else
   const bool in_heater_test = false;
 #endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+  const bool in_fopdt = (st == SystemState::SERVICE) && (g_fopdt_active != 0u);
+#else
+  const bool in_fopdt = false;
+#endif
   const bool in_running_heat = (st == SystemState::RUNNING_HEAT);
 
-  if (!in_heater_test && !in_running_heat) {
+  if (!in_heater_test && !in_fopdt && !in_running_heat) {
     return false;
   }
 

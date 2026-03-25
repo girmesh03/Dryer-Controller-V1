@@ -46,11 +46,21 @@ private:
     uint32_t service_seq_start_ms;
     uint8_t service_menu_selection;
     uint8_t service_view;
+#if ENABLE_SERVICE_DRUM_TEST
     uint8_t service_last_dir;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
     uint8_t heater_test_duty;
     uint8_t service_last_heater_duty;
     uint8_t service_last_heater_on;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
     uint32_t service_pid_last_update_ms;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+    uint8_t service_fopdt_page;
+    uint32_t service_fopdt_last_update_ms;
+#endif
 #endif
 
     uint32_t invalid_key_until_ms;
@@ -69,12 +79,22 @@ private:
 #if ENABLE_SERVICE_MENU
   void renderService_();
   void renderServiceMenu_();
+#if ENABLE_SERVICE_DRUM_TEST
   void renderDrumTest_();
   void updateDrumTestDirection_();
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
   void renderHeaterTest_();
   void updateHeaterTestStatus_();
+#endif
+#if ENABLE_SERVICE_PID_VIEW
   void renderPidView_();
   void updatePidView_();
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+  void renderFopdt_();
+  void updateFopdt_();
+#endif
 #endif
 };
 

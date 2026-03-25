@@ -215,10 +215,27 @@ bool EEPROMStore::loadFOPDT(float& k, float& tau, float& l) const {
   return true;
 }
 
+void EEPROMStore::storeFOPDT(float k, float tau, float l) {
+  if (!isValid()) {
+    return;
+  }
+
+  pending_.fopdt_k = k;
+  pending_.fopdt_tau = tau;
+  pending_.fopdt_l = l;
+
+  writeFloat(ADDR_FOPDT + 0u, k);
+  writeFloat(ADDR_FOPDT + 4u, tau);
+  writeFloat(ADDR_FOPDT + 8u, l);
+
+  writeHeaderAndCRC();
+  state_.last_write_ms = millis();
+  setFlag(FLAG_PENDING_FOPDT, false);
+}
+
 void EEPROMStore::requestSaveFOPDT(float k, float tau, float l) {
   pending_.fopdt_k = k;
   pending_.fopdt_tau = tau;
   pending_.fopdt_l = l;
   setFlag(FLAG_PENDING_FOPDT, true);
 }
-

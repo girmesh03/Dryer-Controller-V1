@@ -29,6 +29,17 @@ SRAM_WARN = 1536     # 75% of 2 KB
 
 EEPROM_USED = 512    # Bytes reserved by our EEPROM map (Appendix D)
 
+def _enable_linker_map():
+    # Always emit a linker MAP file for size profiling.
+    # This is a no-op when not running under PlatformIO/SCons.
+    if env is None:
+        return
+    build_dir = env.subst("$BUILD_DIR")
+    progname = env.subst("${PROGNAME}")
+    map_path = os.path.join(build_dir, f"{progname}.map")
+    env.Append(LINKFLAGS=[f"-Wl,-Map,{map_path}"])
+
+
 def _move_flag_to_cxx_only(flag):
     # PlatformIO applies build_flags to both C and C++. Some flags are C++-only
     # (e.g., -fno-rtti) and will emit warnings for C sources. Move them to
@@ -45,6 +56,7 @@ _move_flag_to_cxx_only("-fno-rtti")
 _move_flag_to_cxx_only("-fno-exceptions")
 if env is not None:
     env.Append(CXXFLAGS=["-fno-threadsafe-statics"])
+    _enable_linker_map()
 
 
 def _write_generated_header(project_dir, flash_used, sram_used):
@@ -155,6 +167,44 @@ def check_memory_usage(source, target, env):
     print(("=" * 50) + "\n")
 
     _write_generated_header(project_dir, flash_used, sram_used)
+
+    # Optional: print top symbols for quick triage.
+    try:
+        enabled = str(env.GetProjectOption("custom_size_profile", "0")).strip() == "1"
+    except Exception:
+        enabled = False
+
+    if enabled:
+        nm_tool = env.get("NM", "avr-nm")
+        try:
+            nm = subprocess.run(
+                [nm_tool, "-S", "--size-sort", "-r", "-t", "dec", "-C", firmware_path],
+                capture_output=True,
+                text=True,
+            )
+            if nm.returncode == 0 and nm.stdout:
+                print("TOP SYMBOLS (largest first):")
+                # Filter to "real" symbols (text/data/bss/rodata) to avoid debug section noise.
+                keep_types = set("tTwWdDbBrRvV")
+                printed = 0
+                for raw in nm.stdout.splitlines():
+                    ln = raw.strip()
+                    if not ln:
+                        continue
+                    parts = ln.split(None, 3)
+                    if len(parts) < 4:
+                        continue
+                    sym_type = parts[2]
+                    if sym_type and sym_type[0] in keep_types:
+                        print("  " + ln)
+                        printed += 1
+                        if printed >= 30:
+                            break
+                print()
+            else:
+                print("NOTE: avr-nm size profile unavailable")
+        except Exception:
+            print("NOTE: avr-nm size profile failed")
 
 
 if env is not None:

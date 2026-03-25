@@ -8,6 +8,11 @@
 #include "heater_control.h"
 #include "pid_control.h"
 #include "ui_lcd.h"
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+#include "eeprom_store.h"
+#include "fopdt_model.h"
+#include "io_abstraction.h"
+#endif
 
 extern UILCD lcd;
 extern DS18B20Sensor tempSensor;
@@ -16,7 +21,15 @@ extern HeaterControl heaterControl;
 extern PIDControl pidController;
 
 #if ENABLE_SERVICE_MENU
+#if ENABLE_SERVICE_FOPDT_ID
+extern IOAbstraction io;
+extern EEPROMStore eepromStore;
+extern FOPDTModel fopdt;
+extern uint8_t g_fopdt_active;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
 extern uint8_t g_heater_test_active;
+#endif
 #endif
 
 #ifndef ENABLE_SERIAL_DEBUG
@@ -30,15 +43,87 @@ constexpr uint32_t kIdleTempRefreshMs = 1000;
 
 #if ENABLE_SERVICE_MENU
 constexpr uint32_t kServiceSeqTimeoutMs = 5000;
-constexpr uint32_t kPidViewRefreshMs = 1000;
-
 constexpr uint8_t kServiceViewMenu = 0u;
+#if ENABLE_SERVICE_DRUM_TEST
 constexpr uint8_t kServiceViewDrumTest = 1u;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
 constexpr uint8_t kServiceViewHeaterTest = 2u;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
 constexpr uint8_t kServiceViewPidView = 3u;
+constexpr uint32_t kPidViewRefreshMs = 1000;
+#endif
+#if ENABLE_SERVICE_IO_TEST
 constexpr uint8_t kServiceViewIoTest = 4u;
-constexpr uint8_t kServiceMenuItems = 4u;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+constexpr uint8_t kServiceViewFopdt = 5u;
+constexpr uint32_t kFopdtRefreshMs = 1000;
 
+constexpr float kFopdtStepSize = 0.3f; // 30% (fraction)
+constexpr float kFopdtAmbientMinC = 15.0f;
+constexpr float kFopdtAmbientMaxC = 30.0f;
+#endif
+
+enum class ServiceItem : uint8_t {
+#if ENABLE_SERVICE_DRUM_TEST
+  DRUM_TEST,
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
+  HEATER_TEST,
+#endif
+#if ENABLE_SERVICE_PID_VIEW
+  PID_VIEW,
+#endif
+#if ENABLE_SERVICE_IO_TEST
+  IO_TEST,
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+  FOPDT_ID,
+#endif
+};
+
+// NOTE: The AVR toolchain defaults to C++11, where constexpr functions are
+// restricted to a single return statement. Keep this as a pure constant
+// expression so it works under C++11 without extra init code.
+constexpr uint8_t kServiceMenuItems =
+    static_cast<uint8_t>(ENABLE_SERVICE_DRUM_TEST + ENABLE_SERVICE_HEATER_TEST + ENABLE_SERVICE_PID_VIEW +
+                         ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FOPDT_ID);
+static_assert(kServiceMenuItems > 0u, "Service menu enabled but no service tools enabled");
+
+ServiceItem serviceMenuItemByIndex_(uint8_t idx) {
+#if ENABLE_SERVICE_DRUM_TEST
+  if (idx-- == 0u) return ServiceItem::DRUM_TEST;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
+  if (idx-- == 0u) return ServiceItem::HEATER_TEST;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
+  if (idx-- == 0u) return ServiceItem::PID_VIEW;
+#endif
+#if ENABLE_SERVICE_IO_TEST
+  if (idx-- == 0u) return ServiceItem::IO_TEST;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+  if (idx-- == 0u) return ServiceItem::FOPDT_ID;
+#endif
+
+  // Fallback (should be unreachable due to bounds checks).
+#if ENABLE_SERVICE_DRUM_TEST
+  return ServiceItem::DRUM_TEST;
+#elif ENABLE_SERVICE_HEATER_TEST
+  return ServiceItem::HEATER_TEST;
+#elif ENABLE_SERVICE_PID_VIEW
+  return ServiceItem::PID_VIEW;
+#elif ENABLE_SERVICE_IO_TEST
+  return ServiceItem::IO_TEST;
+#else
+  return ServiceItem::FOPDT_ID;
+#endif
+}
+
+#if ENABLE_SERVICE_HEATER_TEST || ENABLE_SERVICE_FOPDT_ID
 void formatDuty3Chars(uint8_t duty, char out[4]) {
   if (duty > 100u) {
     duty = 100u;
@@ -61,7 +146,9 @@ void formatDuty3Chars(uint8_t duty, char out[4]) {
   }
   out[3] = '\0';
 }
+#endif
 
+#if ENABLE_SERVICE_PID_VIEW
 uint8_t clampFloatToU8(float value, uint8_t max_v) {
   if (value <= 0.0f) {
     return 0u;
@@ -79,7 +166,9 @@ void clearLine20(char line[21]) {
   }
   line[20] = '\0';
 }
+#endif
 
+#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID
 uint16_t scaleClampU16(float value, float scale, uint16_t max_scaled) {
   if (value <= 0.0f) {
     return 0u;
@@ -91,13 +180,17 @@ uint16_t scaleClampU16(float value, float scale, uint16_t max_scaled) {
   }
   return static_cast<uint16_t>(scaled);
 }
+#endif
 
+#if ENABLE_SERVICE_PID_VIEW
 void writeU8_3(char* dest, uint8_t value) {
   dest[0] = static_cast<char>('0' + (value / 100u));
   dest[1] = static_cast<char>('0' + ((value / 10u) % 10u));
   dest[2] = static_cast<char>('0' + (value % 10u));
 }
+#endif
 
+#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID
 void writeU16Whole3(char* dest, uint16_t whole) {
   if (whole >= 100u) {
     dest[0] = static_cast<char>('0' + ((whole / 100u) % 10u));
@@ -132,6 +225,7 @@ void writeU16_2dp6(char* dest, uint16_t scaled100) {
   dest[4] = static_cast<char>('0' + (frac / 10u));
   dest[5] = static_cast<char>('0' + (frac % 10u));
 }
+#endif
 #endif // ENABLE_SERVICE_MENU
 } // namespace
 
@@ -147,11 +241,21 @@ void AppStateMachine::init() {
   state_.service_seq_start_ms = 0;
   state_.service_menu_selection = 0;
   state_.service_view = kServiceViewMenu;
+#if ENABLE_SERVICE_DRUM_TEST
   state_.service_last_dir = 255u;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
   state_.heater_test_duty = 0u;
   state_.service_last_heater_duty = 255u;
   state_.service_last_heater_on = 255u;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
   state_.service_pid_last_update_ms = 0u;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+  state_.service_fopdt_page = 0u;
+  state_.service_fopdt_last_update_ms = 0u;
+#endif
 #endif
 
   state_.invalid_key_until_ms = 0;
@@ -242,7 +346,13 @@ void AppStateMachine::onExit_(SystemState old_state) {
   if (old_state == SystemState::SERVICE) {
     // Safety: never leave service tools with the drum running.
     drumControl.stop();
+#if ENABLE_SERVICE_HEATER_TEST
     g_heater_test_active = 0u;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+    g_fopdt_active = 0u;
+    fopdt.abort();
+#endif
     heaterControl.disable();
   }
 #else
@@ -287,15 +397,22 @@ void AppStateMachine::renderService_() {
     case kServiceViewMenu:
       renderServiceMenu_();
       break;
+#if ENABLE_SERVICE_DRUM_TEST
     case kServiceViewDrumTest:
       renderDrumTest_();
       break;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
     case kServiceViewHeaterTest:
       renderHeaterTest_();
       break;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
     case kServiceViewPidView:
       renderPidView_();
       break;
+#endif
+#if ENABLE_SERVICE_IO_TEST
     case kServiceViewIoTest:
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -305,6 +422,12 @@ void AppStateMachine::renderService_() {
       lcd.setCursor(0, 3);
       lcd.print(F("B:BACK"));
       break;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+    case kServiceViewFopdt:
+      renderFopdt_();
+      break;
+#endif
     default:
       state_.service_view = kServiceViewMenu;
       renderServiceMenu_();
@@ -317,25 +440,52 @@ void AppStateMachine::renderServiceMenu_() {
   lcd.setCursor(0, 0);
   lcd.print(F("SERVICE MENU"));
 
-  const uint8_t start_index = (state_.service_menu_selection <= 1u) ? 0u : 1u;
+  uint8_t start_index = 0u;
+  if (kServiceMenuItems > 3u) {
+    if (state_.service_menu_selection > 1u) {
+      start_index = static_cast<uint8_t>(state_.service_menu_selection - 1u);
+      const uint8_t max_start = static_cast<uint8_t>(kServiceMenuItems - 3u);
+      if (start_index > max_start) {
+        start_index = max_start;
+      }
+    }
+  }
   for (uint8_t row = 0u; row < 3u; row++) {
     const uint8_t item = static_cast<uint8_t>(start_index + row);
     lcd.setCursor(0, static_cast<uint8_t>(row + 1u));
+    if (item >= kServiceMenuItems) {
+      lcd.print(F("                    "));
+      continue;
+    }
+
     lcd.print((item == state_.service_menu_selection) ? F("> ") : F("  "));
 
-    switch (item) {
-      case 0u:
+    switch (serviceMenuItemByIndex_(item)) {
+#if ENABLE_SERVICE_DRUM_TEST
+      case ServiceItem::DRUM_TEST:
         lcd.print(F("DRUM TEST         "));
         break;
-      case 1u:
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
+      case ServiceItem::HEATER_TEST:
         lcd.print(F("HEATER TEST       "));
         break;
-      case 2u:
+#endif
+#if ENABLE_SERVICE_PID_VIEW
+      case ServiceItem::PID_VIEW:
         lcd.print(F("PID VIEW          "));
         break;
-      case 3u:
+#endif
+#if ENABLE_SERVICE_IO_TEST
+      case ServiceItem::IO_TEST:
         lcd.print(F("I/O TEST          "));
         break;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+      case ServiceItem::FOPDT_ID:
+        lcd.print(F("FOPDT ID          "));
+        break;
+#endif
       default:
         lcd.print(F("                  "));
         break;
@@ -343,6 +493,7 @@ void AppStateMachine::renderServiceMenu_() {
   }
 }
 
+#if ENABLE_SERVICE_DRUM_TEST
 void AppStateMachine::updateDrumTestDirection_() {
   const DrumControl::Direction dir = drumControl.getCurrentDirection();
   const uint8_t dir_u = static_cast<uint8_t>(dir);
@@ -381,7 +532,9 @@ void AppStateMachine::renderDrumTest_() {
   lcd.setCursor(0, 3);
   lcd.print(F("B:STOP"));
 }
+#endif // ENABLE_SERVICE_DRUM_TEST
 
+#if ENABLE_SERVICE_HEATER_TEST
 void AppStateMachine::updateHeaterTestStatus_() {
   const uint8_t duty = state_.heater_test_duty;
   const uint8_t on = heaterControl.isHeaterOn() ? 1u : 0u;
@@ -418,7 +571,9 @@ void AppStateMachine::renderHeaterTest_() {
   lcd.setCursor(0, 3);
   lcd.print(F("UP/DN:ADJUST"));
 }
+#endif // ENABLE_SERVICE_HEATER_TEST
 
+#if ENABLE_SERVICE_PID_VIEW
 void AppStateMachine::updatePidView_() {
   const uint32_t now = millis();
   if (state_.service_pid_last_update_ms != 0u &&
@@ -510,6 +665,209 @@ void AppStateMachine::renderPidView_() {
   state_.service_pid_last_update_ms = 0u;
   updatePidView_();
 }
+#endif // ENABLE_SERVICE_PID_VIEW
+
+#if ENABLE_SERVICE_FOPDT_ID
+void AppStateMachine::renderFopdt_() {
+  const FOPDTModel::State st = fopdt.getState();
+
+  if (st == FOPDTModel::State::IDLE) {
+    const bool door_ok = io.isDoorClosed();
+    const bool sens_ok = tempSensor.isValid();
+
+    lcd.setCursor(0, 0);
+    lcd.print(F("FOPDT ID            "));
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("EMPTY DRUM          "));
+
+    lcd.setCursor(0, 2);
+    lcd.print(F("D:"));
+    lcd.print(door_ok ? F("OK") : F("OP"));
+    lcd.print(F(" S:"));
+    lcd.print(sens_ok ? F("OK") : F("ER"));
+    lcd.print(F(" AMB15-30C"));
+    lcd.print(F(" "));
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("A:START B:CANCEL    "));
+    return;
+  }
+
+  if (st == FOPDTModel::State::COMPLETE) {
+    float k = 0.0f;
+    float tau_s = 0.0f;
+    float l_s = 0.0f;
+    const bool ok = fopdt.getResults(k, tau_s, l_s);
+
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    if (ok) {
+      fopdt.computePIDGains(k, tau_s, l_s, kp, ki, kd);
+    }
+
+    if (state_.service_fopdt_page == 0u) {
+      lcd.setCursor(0, 0);
+      lcd.print(F("FOPDT RESULT        "));
+
+      const uint16_t k100 = scaleClampU16(k, 100.0f, 65535u);
+      const uint16_t tau_u16 = scaleClampU16(tau_s, 1.0f, 999u);
+      const uint16_t l_u16 = scaleClampU16(l_s, 1.0f, 999u);
+
+      char k_str[7];
+      writeU16_2dp6(k_str, k100);
+      k_str[6] = '\0';
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("K:"));
+      lcd.print(k_str);
+      lcd.print(F(" tau:"));
+      char tau_str[4];
+      writeU16Whole3(tau_str, tau_u16);
+      tau_str[3] = '\0';
+      lcd.print(tau_str);
+      lcd.print(F("s"));
+      lcd.print(F("   "));
+
+      lcd.setCursor(0, 2);
+      lcd.print(F("L:"));
+      char l_str[4];
+      writeU16Whole3(l_str, l_u16);
+      l_str[3] = '\0';
+      lcd.print(l_str);
+      lcd.print(F("s"));
+      lcd.print(F("              "));
+
+      lcd.setCursor(0, 3);
+      lcd.print(F("A:ACPT B:REJ OK:>   "));
+      return;
+    }
+
+    lcd.setCursor(0, 0);
+    lcd.print(F("IMC GAINS           "));
+
+    const uint16_t kp10 = scaleClampU16(kp, 10.0f, 9999u);
+    const uint16_t ki100 = scaleClampU16(ki, 100.0f, 65535u);
+    const uint16_t kd100 = scaleClampU16(kd, 100.0f, 65535u);
+
+    char kp_str[6];
+    writeU16_1dp5(kp_str, kp10);
+    kp_str[5] = '\0';
+
+    char ki_str[7];
+    writeU16_2dp6(ki_str, ki100);
+    ki_str[6] = '\0';
+
+    char kd_str[7];
+    writeU16_2dp6(kd_str, kd100);
+    kd_str[6] = '\0';
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("Kp:"));
+    lcd.print(kp_str);
+    lcd.print(F(" Ki:"));
+    lcd.print(ki_str);
+    lcd.print(F("  "));
+
+    lcd.setCursor(0, 2);
+    lcd.print(F("Kd:"));
+    lcd.print(kd_str);
+    lcd.print(F("           ")); // pad to end of 20-char line
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("A:ACPT B:REJ OK:<   "));
+    return;
+  }
+
+  // BASELINE / STEP / MEASURE progress screens.
+  const uint16_t rem_s = fopdt.getBaselineSecondsRemaining();
+  const uint16_t elap_s = fopdt.getMeasureSecondsElapsed();
+  const uint8_t duty = fopdt.getStepDutyPercent();
+
+  const uint16_t temp10 = scaleClampU16(tempSensor.getTemperature(), 10.0f, 9999u);
+  char temp_str[6];
+  writeU16_1dp5(temp_str, temp10);
+  temp_str[5] = '\0';
+
+  lcd.setCursor(0, 0);
+  if (st == FOPDTModel::State::BASELINE) {
+    lcd.print(F("FOPDT BASELINE      "));
+  } else if (st == FOPDTModel::State::STEP) {
+    lcd.print(F("FOPDT STEP          "));
+  } else {
+    lcd.print(F("FOPDT MEASURE       "));
+  }
+
+  lcd.setCursor(0, 1);
+  if (st == FOPDTModel::State::BASELINE) {
+    lcd.print(F("T-LEFT:"));
+    char rem_str[4];
+    writeU16Whole3(rem_str, (rem_s > 999u) ? 999u : rem_s);
+    rem_str[3] = '\0';
+    lcd.print(rem_str);
+    lcd.print(F("s"));
+    lcd.print(F("         "));
+  } else {
+    lcd.print(F("DUTY:"));
+    char duty_str[4];
+    formatDuty3Chars(duty, duty_str);
+    lcd.print(duty_str);
+    lcd.print(F("% ELAP:"));
+    char elap_str[4];
+    writeU16Whole3(elap_str, (elap_s > 999u) ? 999u : elap_s);
+    elap_str[3] = '\0';
+    lcd.print(elap_str);
+    lcd.print(F("s"));
+    lcd.print(F(" "));
+  }
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("TEMP:"));
+  lcd.print(temp_str);
+  lcd.print(F("C"));
+  lcd.print(F("         "));
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("B:ABORT"));
+  lcd.print(F("             "));
+}
+
+void AppStateMachine::updateFopdt_() {
+  const uint32_t now = millis();
+  if (state_.service_fopdt_last_update_ms != 0u &&
+      (now - state_.service_fopdt_last_update_ms) < kFopdtRefreshMs) {
+    return;
+  }
+  state_.service_fopdt_last_update_ms = now;
+
+  if (fopdt.isIdentifying()) {
+    if (!io.isDoorClosed() || !tempSensor.isValid()) {
+      fopdt.abort();
+      g_fopdt_active = 0u;
+      heaterControl.disable();
+      state_.service_fopdt_page = 0u;
+      renderFopdt_();
+      return;
+    }
+
+    fopdt.updateIdentification(tempSensor.getTemperature(), static_cast<float>(heaterControl.getCurrentDuty()));
+
+    // Drive the heater step via HeaterControl; safety gating remains enforced there.
+    const FOPDTModel::State st = fopdt.getState();
+    if (st == FOPDTModel::State::BASELINE) {
+      heaterControl.setDutyCycle(0.0f);
+    } else if (st == FOPDTModel::State::STEP || st == FOPDTModel::State::MEASURE) {
+      heaterControl.setDutyCycle(static_cast<float>(fopdt.getStepDutyPercent()));
+    } else if (st == FOPDTModel::State::COMPLETE) {
+      g_fopdt_active = 0u;
+      heaterControl.disable();
+    }
+  }
+
+  renderFopdt_();
+}
+#endif // ENABLE_SERVICE_FOPDT_ID
 #endif // ENABLE_SERVICE_MENU
 
 void AppStateMachine::update() {
@@ -532,20 +890,33 @@ void AppStateMachine::update() {
   }
 
 #if ENABLE_SERVICE_MENU
+#if ENABLE_SERVICE_DRUM_TEST
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
       state_.service_view == kServiceViewDrumTest) {
     updateDrumTestDirection_();
   }
+#endif
 
+#if ENABLE_SERVICE_HEATER_TEST
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
       state_.service_view == kServiceViewHeaterTest) {
     updateHeaterTestStatus_();
   }
+#endif
 
+#if ENABLE_SERVICE_PID_VIEW
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
       state_.service_view == kServiceViewPidView) {
     updatePidView_();
   }
+#endif
+
+#if ENABLE_SERVICE_FOPDT_ID
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewFopdt) {
+    updateFopdt_();
+  }
+#endif
 #endif
 
   if (state_.current_state == SystemState::BOOT) {
@@ -572,14 +943,26 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
     if (state_.current_state == SystemState::SERVICE) {
       if (state_.service_view != kServiceViewMenu) {
         // STOP acts as "back" inside service tools (and stops the drum test).
+#if ENABLE_SERVICE_DRUM_TEST
         if (state_.service_view == kServiceViewDrumTest) {
           drumControl.stop();
         }
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
         if (state_.service_view == kServiceViewHeaterTest) {
           g_heater_test_active = 0u;
           heaterControl.disable();
           state_.heater_test_duty = 0u;
         }
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+        if (state_.service_view == kServiceViewFopdt) {
+          fopdt.abort();
+          g_fopdt_active = 0u;
+          heaterControl.disable();
+          state_.service_fopdt_page = 0u;
+        }
+#endif
         state_.service_view = kServiceViewMenu;
         renderService_();
         return;
@@ -662,6 +1045,7 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
 
 #if ENABLE_SERVICE_MENU
     case SystemState::SERVICE: {
+#if ENABLE_SERVICE_HEATER_TEST
       if (state_.service_view == kServiceViewHeaterTest) {
         if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN) {
           uint8_t duty = state_.heater_test_duty;
@@ -679,6 +1063,82 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
         showInvalidKey_();
         return;
       }
+#endif
+
+#if ENABLE_SERVICE_FOPDT_ID
+      if (state_.service_view == kServiceViewFopdt) {
+        const FOPDTModel::State fst = fopdt.getState();
+
+        if (key == KeypadInput::Key::OK && fst == FOPDTModel::State::COMPLETE) {
+          state_.service_fopdt_page ^= 1u;
+          renderFopdt_();
+          return;
+        }
+
+        if (key == KeypadInput::Key::START) {
+          if (fst == FOPDTModel::State::IDLE) {
+            const bool door_ok = io.isDoorClosed();
+            const bool sens_ok = tempSensor.isValid();
+            const float pv = tempSensor.getTemperature();
+            const bool ambient_ok = (pv >= kFopdtAmbientMinC) && (pv <= kFopdtAmbientMaxC);
+
+            if (!door_ok || !sens_ok || !ambient_ok) {
+              state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+              lcd.setCursor(0, 3);
+              lcd.print(F("CHECK DOOR/TEMP"));
+              return;
+            }
+
+            // Ensure other service tools are inactive.
+            drumControl.stop();
+#if ENABLE_SERVICE_HEATER_TEST
+            g_heater_test_active = 0u;
+#endif
+            heaterControl.disable();
+
+            heaterControl.setDutyCycle(0.0f);
+            heaterControl.enable();
+            g_fopdt_active = 1u;
+
+            state_.service_fopdt_page = 0u;
+            state_.service_fopdt_last_update_ms = 0u;
+            fopdt.startIdentification(kFopdtStepSize);
+            renderFopdt_();
+            return;
+          }
+
+          if (fst == FOPDTModel::State::COMPLETE) {
+            float k = 0.0f;
+            float tau_s = 0.0f;
+            float l_s = 0.0f;
+            if (fopdt.getResults(k, tau_s, l_s)) {
+              float kp = 0.0f;
+              float ki = 0.0f;
+              float kd = 0.0f;
+              fopdt.computePIDGains(k, tau_s, l_s, kp, ki, kd);
+
+              pidController.setTunings(kp, ki, kd);
+              eepromStore.requestSaveFOPDT(k, tau_s, l_s);
+              eepromStore.requestSavePIDGains(kp, ki, kd);
+              eepromStore.update(now);
+            }
+
+            g_fopdt_active = 0u;
+            heaterControl.disable();
+
+            state_.service_view = kServiceViewMenu;
+            renderService_();
+            state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+            lcd.setCursor(0, 3);
+            lcd.print(F("SAVED"));
+            return;
+          }
+        }
+
+        showInvalidKey_();
+        return;
+      }
+#endif
 
       if (state_.service_view != kServiceViewMenu) {
         showInvalidKey_();
@@ -700,26 +1160,55 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       }
 
       if (key == KeypadInput::Key::OK) {
-        if (state_.service_menu_selection == 0u) {
-          drumControl.setPattern(50u, 50u, 5u);
-          drumControl.start();
-          state_.service_view = kServiceViewDrumTest;
-          renderService_();
-          return;
+        const ServiceItem item = serviceMenuItemByIndex_(state_.service_menu_selection);
+
+        switch (item) {
+#if ENABLE_SERVICE_DRUM_TEST
+          case ServiceItem::DRUM_TEST:
+            drumControl.setPattern(50u, 50u, 5u);
+            drumControl.start();
+            state_.service_view = kServiceViewDrumTest;
+            renderService_();
+            return;
+#endif
+#if ENABLE_SERVICE_HEATER_TEST
+          case ServiceItem::HEATER_TEST:
+            state_.heater_test_duty = 0u;
+            heaterControl.setDutyCycle(0.0f);
+            heaterControl.enable();
+            g_heater_test_active = 1u;
+            state_.service_view = kServiceViewHeaterTest;
+            renderService_();
+            return;
+#endif
+#if ENABLE_SERVICE_PID_VIEW
+          case ServiceItem::PID_VIEW:
+            state_.service_view = kServiceViewPidView;
+            renderService_();
+            return;
+#endif
+#if ENABLE_SERVICE_IO_TEST
+          case ServiceItem::IO_TEST:
+            state_.service_view = kServiceViewIoTest;
+            renderService_();
+            return;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+          case ServiceItem::FOPDT_ID:
+            fopdt.abort();
+            g_fopdt_active = 0u;
+            heaterControl.disable();
+            state_.service_fopdt_page = 0u;
+            state_.service_fopdt_last_update_ms = 0u;
+            state_.service_view = kServiceViewFopdt;
+            renderService_();
+            return;
+#endif
+          default:
+            break;
         }
 
-        if (state_.service_menu_selection == 1u) {
-          state_.heater_test_duty = 0u;
-          heaterControl.setDutyCycle(0.0f);
-          heaterControl.enable();
-          g_heater_test_active = 1u;
-          state_.service_view = kServiceViewHeaterTest;
-          renderService_();
-          return;
-        }
-
-        state_.service_view = (state_.service_menu_selection == 2u) ? kServiceViewPidView : kServiceViewIoTest;
-        renderService_();
+        showInvalidKey_();
         return;
       }
 
