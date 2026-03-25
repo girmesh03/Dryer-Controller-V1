@@ -7,6 +7,7 @@
 #include "config_pins.h"
 #include "ds18b20_sensor.h"
 #include "drum_control.h"
+#include "heater_control.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
 #include "ui_lcd.h"
@@ -23,11 +24,21 @@ static EEPROMStore eepromStore;
 uint8_t g_reset_flags_mcusr = 0;
 bool g_was_watchdog_reset = false;
 
+// Phase 10 will replace this placeholder with the real fault system.
+uint8_t g_has_fault = 0u;
+
+// Phase 5 service-mode flag for HEATER TEST.
+uint8_t g_heater_test_active = 0u;
+
+// Phase 6+ will manage this setpoint during RUNNING_HEAT.
+float g_setpoint_c = 0.0f;
+
 UILCD lcd;
 KeypadInput keypad;
 AppStateMachine app;
 DS18B20Sensor tempSensor;
 DrumControl drumControl;
+HeaterControl heaterControl;
 
 namespace {
 #if ENABLE_SERIAL_DEBUG
@@ -69,6 +80,7 @@ void setup() {
 
   tempSensor.init();
   drumControl.init();
+  heaterControl.init();
   lcd.init();
   keypad.init();
   app.init();
@@ -76,7 +88,7 @@ void setup() {
 #if ENABLE_SERIAL_DEBUG
   Serial.begin(115200);
   Serial.println();
-  Serial.println(F("Industrial Dryer Controller - Phase 4"));
+  Serial.println(F("Industrial Dryer Controller - Phase 5"));
   printResetFlags(g_reset_flags_mcusr);
 
   Serial.print(F("EEPROM CRC valid: "));
@@ -100,6 +112,7 @@ void loop() {
   static uint32_t last_io_ms = 0;
   static uint32_t last_app_ms = 0;
   static uint32_t last_drum_ms = 0;
+  static uint32_t last_heater_ms = 0;
   static uint32_t last_lcd_ms = 0;
   static uint32_t last_temp_ms = 0;
   static uint32_t last_slow_ms = 0;
@@ -145,6 +158,13 @@ void loop() {
     const auto dir = drumControl.getCurrentDirection();
     io.setMotorForward(dir == DrumControl::Direction::FORWARD);
     io.setMotorReverse(dir == DrumControl::Direction::REVERSE);
+  }
+
+  // Heater control: 10 Hz (100ms)
+  if (now - last_heater_ms >= FAST_LOOP_PERIOD) {
+    last_heater_ms = now;
+    heaterControl.update();
+    io.setHeaterRelay(heaterControl.isHeaterOn());
   }
 
   // DS18B20 state machine: 4 Hz (250ms)

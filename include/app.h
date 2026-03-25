@@ -45,6 +45,9 @@ private:
     uint8_t service_menu_selection;
     uint8_t service_view;
     uint8_t service_last_dir;
+    uint8_t heater_test_duty;
+    uint8_t service_last_heater_duty;
+    uint8_t service_last_heater_on;
 
     uint32_t invalid_key_until_ms;
     uint32_t last_temp_display_ms;
@@ -63,6 +66,8 @@ private:
   void renderServiceMenu_();
   void renderDrumTest_();
   void updateDrumTestDirection_();
+  void renderHeaterTest_();
+  void updateHeaterTestStatus_();
 };
 
 #endif

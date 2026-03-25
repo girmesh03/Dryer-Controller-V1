@@ -5,11 +5,15 @@
 #include "config_build.h"
 #include "ds18b20_sensor.h"
 #include "drum_control.h"
+#include "heater_control.h"
 #include "ui_lcd.h"
 
 extern UILCD lcd;
 extern DS18B20Sensor tempSensor;
 extern DrumControl drumControl;
+extern HeaterControl heaterControl;
+
+extern uint8_t g_heater_test_active;
 
 #ifndef ENABLE_SERIAL_DEBUG
 #define ENABLE_SERIAL_DEBUG 0
@@ -23,9 +27,33 @@ constexpr uint32_t kIdleTempRefreshMs = 1000;
 
 constexpr uint8_t kServiceViewMenu = 0u;
 constexpr uint8_t kServiceViewDrumTest = 1u;
-constexpr uint8_t kServiceViewPidView = 2u;
-constexpr uint8_t kServiceViewIoTest = 3u;
-constexpr uint8_t kServiceMenuItems = 3u;
+constexpr uint8_t kServiceViewHeaterTest = 2u;
+constexpr uint8_t kServiceViewPidView = 3u;
+constexpr uint8_t kServiceViewIoTest = 4u;
+constexpr uint8_t kServiceMenuItems = 4u;
+
+void formatDuty3Chars(uint8_t duty, char out[4]) {
+  if (duty > 100u) {
+    duty = 100u;
+  }
+  if (duty == 100u) {
+    out[0] = '1';
+    out[1] = '0';
+    out[2] = '0';
+    out[3] = '\0';
+    return;
+  }
+
+  out[0] = ' ';
+  if (duty >= 10u) {
+    out[1] = static_cast<char>('0' + (duty / 10u));
+    out[2] = static_cast<char>('0' + (duty % 10u));
+  } else {
+    out[1] = ' ';
+    out[2] = static_cast<char>('0' + duty);
+  }
+  out[3] = '\0';
+}
 } // namespace
 
 void AppStateMachine::init() {
@@ -39,6 +67,9 @@ void AppStateMachine::init() {
   state_.service_menu_selection = 0;
   state_.service_view = kServiceViewMenu;
   state_.service_last_dir = 255u;
+  state_.heater_test_duty = 0u;
+  state_.service_last_heater_duty = 255u;
+  state_.service_last_heater_on = 255u;
   state_.invalid_key_until_ms = 0;
   state_.last_temp_display_ms = 0;
   state_.last_temp_valid = 0;
@@ -112,6 +143,8 @@ void AppStateMachine::onExit_(SystemState old_state) {
   if (old_state == SystemState::SERVICE) {
     // Safety: never leave service tools with the drum running.
     drumControl.stop();
+    g_heater_test_active = 0u;
+    heaterControl.disable();
   }
 }
 
@@ -154,6 +187,9 @@ void AppStateMachine::renderService_() {
     case kServiceViewDrumTest:
       renderDrumTest_();
       break;
+    case kServiceViewHeaterTest:
+      renderHeaterTest_();
+      break;
     case kServiceViewPidView:
       lcd.clear();
       lcd.setCursor(0, 0);
@@ -184,12 +220,30 @@ void AppStateMachine::renderServiceMenu_() {
   lcd.setCursor(0, 0);
   lcd.print(F("SERVICE MENU"));
 
-  lcd.setCursor(0, 1);
-  lcd.print((state_.service_menu_selection == 0u) ? F("> DRUM TEST") : F("  DRUM TEST"));
-  lcd.setCursor(0, 2);
-  lcd.print((state_.service_menu_selection == 1u) ? F("> PID VIEW") : F("  PID VIEW"));
-  lcd.setCursor(0, 3);
-  lcd.print((state_.service_menu_selection == 2u) ? F("> I/O TEST") : F("  I/O TEST"));
+  const uint8_t start_index = (state_.service_menu_selection <= 1u) ? 0u : 1u;
+  for (uint8_t row = 0u; row < 3u; row++) {
+    const uint8_t item = static_cast<uint8_t>(start_index + row);
+    lcd.setCursor(0, static_cast<uint8_t>(row + 1u));
+    lcd.print((item == state_.service_menu_selection) ? F("> ") : F("  "));
+
+    switch (item) {
+      case 0u:
+        lcd.print(F("DRUM TEST         "));
+        break;
+      case 1u:
+        lcd.print(F("HEATER TEST       "));
+        break;
+      case 2u:
+        lcd.print(F("PID VIEW          "));
+        break;
+      case 3u:
+        lcd.print(F("I/O TEST          "));
+        break;
+      default:
+        lcd.print(F("                  "));
+        break;
+    }
+  }
 }
 
 void AppStateMachine::updateDrumTestDirection_() {
@@ -231,6 +285,43 @@ void AppStateMachine::renderDrumTest_() {
   lcd.print(F("B:STOP"));
 }
 
+void AppStateMachine::updateHeaterTestStatus_() {
+  const uint8_t duty = state_.heater_test_duty;
+  const uint8_t on = heaterControl.isHeaterOn() ? 1u : 0u;
+
+  if (duty != state_.service_last_heater_duty) {
+    state_.service_last_heater_duty = duty;
+    lcd.setCursor(0, 1);
+    lcd.print(F("DUTY: "));
+    char duty_str[4];
+    formatDuty3Chars(duty, duty_str);
+    lcd.print(duty_str);
+    lcd.print(F("%"));
+    lcd.print(F("          "));
+  }
+
+  if (on != state_.service_last_heater_on) {
+    state_.service_last_heater_on = on;
+    lcd.setCursor(0, 2);
+    lcd.print(F("STATE: "));
+    lcd.print(on ? F("ON ") : F("OFF"));
+    lcd.print(F("          "));
+  }
+}
+
+void AppStateMachine::renderHeaterTest_() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("HEATER TEST"));
+
+  state_.service_last_heater_duty = 255u;
+  state_.service_last_heater_on = 255u;
+  updateHeaterTestStatus_();
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("UP/DN:ADJUST"));
+}
+
 void AppStateMachine::update() {
   const uint32_t now = millis();
 
@@ -253,6 +344,11 @@ void AppStateMachine::update() {
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
       state_.service_view == kServiceViewDrumTest) {
     updateDrumTestDirection_();
+  }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewHeaterTest) {
+    updateHeaterTestStatus_();
   }
 
   if (state_.current_state == SystemState::BOOT) {
@@ -278,6 +374,11 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
         // STOP acts as "back" inside service tools (and stops the drum test).
         if (state_.service_view == kServiceViewDrumTest) {
           drumControl.stop();
+        }
+        if (state_.service_view == kServiceViewHeaterTest) {
+          g_heater_test_active = 0u;
+          heaterControl.disable();
+          state_.heater_test_duty = 0u;
         }
         state_.service_view = kServiceViewMenu;
         renderService_();
@@ -357,6 +458,24 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
     }
 
     case SystemState::SERVICE: {
+      if (state_.service_view == kServiceViewHeaterTest) {
+        if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN) {
+          uint8_t duty = state_.heater_test_duty;
+          if (key == KeypadInput::Key::UP) {
+            duty = (duty >= 95u) ? 100u : static_cast<uint8_t>(duty + 5u);
+          } else {
+            duty = (duty <= 5u) ? 0u : static_cast<uint8_t>(duty - 5u);
+          }
+          heaterControl.setDutyCycle(static_cast<float>(duty));
+          state_.heater_test_duty = heaterControl.getCurrentDuty();
+          updateHeaterTestStatus_();
+          return;
+        }
+
+        showInvalidKey_();
+        return;
+      }
+
       if (state_.service_view != kServiceViewMenu) {
         showInvalidKey_();
         return;
@@ -385,7 +504,17 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
           return;
         }
 
-        state_.service_view = (state_.service_menu_selection == 1u) ? kServiceViewPidView : kServiceViewIoTest;
+        if (state_.service_menu_selection == 1u) {
+          state_.heater_test_duty = 0u;
+          heaterControl.setDutyCycle(0.0f);
+          heaterControl.enable();
+          g_heater_test_active = 1u;
+          state_.service_view = kServiceViewHeaterTest;
+          renderService_();
+          return;
+        }
+
+        state_.service_view = (state_.service_menu_selection == 2u) ? kServiceViewPidView : kServiceViewIoTest;
         renderService_();
         return;
       }
