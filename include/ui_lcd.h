@@ -19,6 +19,7 @@ public:
   void setCursor(uint8_t col, uint8_t row);
   void print(const char* text);
   void print(const __FlashStringHelper* text);
+  void print(char c);
 
 private:
   LiquidCrystal_I2C lcd_{LCD_I2C_ADDR, 20, 4};

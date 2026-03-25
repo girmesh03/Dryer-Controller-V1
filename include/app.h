@@ -61,6 +61,11 @@ private:
     uint8_t service_fopdt_page;
     uint32_t service_fopdt_last_update_ms;
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+    uint8_t service_autotune_page;
+    uint32_t service_autotune_last_update_ms;
+    uint32_t service_autotune_start_ms;
+#endif
 #endif
 
     uint32_t invalid_key_until_ms;
@@ -94,6 +99,11 @@ private:
 #if ENABLE_SERVICE_FOPDT_ID
   void renderFopdt_();
   void updateFopdt_();
+#endif
+#if ENABLE_SERVICE_AUTOTUNE
+  void renderAutoTunePre_();
+  void renderAutoTune_();
+  void updateAutoTuneUi_();
 #endif
 #endif
 };

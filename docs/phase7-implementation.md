@@ -107,5 +107,10 @@ When `ENABLE_SERVICE_MENU=1`, each tool can be compiled in/out independently:
 - `ENABLE_SERVICE_PID_VIEW`
 - `ENABLE_SERVICE_IO_TEST`
 - `ENABLE_SERVICE_FOPDT_ID`
+- `ENABLE_SERVICE_AUTOTUNE`
 
-The default `platformio.ini` service environment enables only `FOPDT ID` to stay under Flash limits. Enable other tools only when you need them for bench work.
+The default `platformio.ini` service environments enable only one tool at a time to stay under Flash limits:
+- `nanoatmega328`: `FOPDT ID`
+- `nano_autotune`: `AUTO TUNE` (Phase 8)
+
+Enable other tools only when you need them for bench work.

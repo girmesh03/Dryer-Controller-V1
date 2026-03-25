@@ -92,12 +92,19 @@ void HeaterControl::setDutyCycle(float duty_percent) {
     duty = static_cast<uint8_t>(duty_percent + 0.5f);
   }
 
-  // Slew limit relative to the last applied duty at the start of the current window.
-  const int16_t delta = static_cast<int16_t>(duty) - static_cast<int16_t>(state_.last_duty);
-  if (delta > static_cast<int16_t>(kSlewLimitPercentPerWindow)) {
-    duty = static_cast<uint8_t>(state_.last_duty + kSlewLimitPercentPerWindow);
-  } else if (delta < -static_cast<int16_t>(kSlewLimitPercentPerWindow)) {
-    duty = static_cast<uint8_t>(state_.last_duty - kSlewLimitPercentPerWindow);
+  // Slew limiting applies only to closed-loop RUNNING_HEAT operation. Service tools
+  // (HEATER TEST / FOPDT / AUTOTUNE) require true step changes.
+  const SystemState st = app.getCurrentState();
+  const bool apply_slew = (st == SystemState::RUNNING_HEAT);
+
+  if (apply_slew) {
+    // Slew limit relative to the last applied duty at the start of the current window.
+    const int16_t delta = static_cast<int16_t>(duty) - static_cast<int16_t>(state_.last_duty);
+    if (delta > static_cast<int16_t>(kSlewLimitPercentPerWindow)) {
+      duty = static_cast<uint8_t>(state_.last_duty + kSlewLimitPercentPerWindow);
+    } else if (delta < -static_cast<int16_t>(kSlewLimitPercentPerWindow)) {
+      duty = static_cast<uint8_t>(state_.last_duty - kSlewLimitPercentPerWindow);
+    }
   }
 
   state_.duty_percent = duty;
@@ -146,8 +153,13 @@ bool HeaterControl::canEnergizeHeater_() const {
   const bool in_fopdt = false;
 #endif
   const bool in_running_heat = (st == SystemState::RUNNING_HEAT);
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
+  const bool in_autotune = (st == SystemState::AUTOTUNE);
+#else
+  const bool in_autotune = false;
+#endif
 
-  if (!in_heater_test && !in_fopdt && !in_running_heat) {
+  if (!in_heater_test && !in_fopdt && !in_running_heat && !in_autotune) {
     return false;
   }
 
@@ -170,8 +182,17 @@ void HeaterControl::update() {
   const bool safe_to_run = canEnergizeHeater_();
 
   // Safety gating: force OFF immediately (do not honor min-on time).
-  if (!safe_to_run || state_.duty_percent == 0u) {
+  if (!safe_to_run) {
     if (state_.heater_state != 0u) {
+      state_.heater_state = 0u;
+      state_.heater_off_start_ms = now;
+    }
+    return;
+  }
+
+  // Commanded OFF: honor minimum ON time (anti-chatter) unless safety gating fails.
+  if (state_.duty_percent == 0u) {
+    if (state_.heater_state != 0u && canTurnOff_(now)) {
       state_.heater_state = 0u;
       state_.heater_off_start_ms = now;
     }

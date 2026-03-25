@@ -8,10 +8,13 @@
 #include "heater_control.h"
 #include "pid_control.h"
 #include "ui_lcd.h"
-#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+
+#if ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE)
 #include "eeprom_store.h"
-#include "fopdt_model.h"
 #include "io_abstraction.h"
+#endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
+#include "fopdt_model.h"
 #endif
 
 extern UILCD lcd;
@@ -21,9 +24,11 @@ extern HeaterControl heaterControl;
 extern PIDControl pidController;
 
 #if ENABLE_SERVICE_MENU
-#if ENABLE_SERVICE_FOPDT_ID
+#if ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE
 extern IOAbstraction io;
 extern EEPROMStore eepromStore;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
 extern FOPDTModel fopdt;
 extern uint8_t g_fopdt_active;
 #endif
@@ -66,6 +71,11 @@ constexpr float kFopdtAmbientMinC = 15.0f;
 constexpr float kFopdtAmbientMaxC = 30.0f;
 #endif
 
+#if ENABLE_SERVICE_AUTOTUNE
+constexpr uint8_t kServiceViewAutoTunePre = 6u;
+constexpr uint32_t kAutoTuneUiRefreshMs = 1000;
+#endif
+
 enum class ServiceItem : uint8_t {
 #if ENABLE_SERVICE_DRUM_TEST
   DRUM_TEST,
@@ -82,6 +92,9 @@ enum class ServiceItem : uint8_t {
 #if ENABLE_SERVICE_FOPDT_ID
   FOPDT_ID,
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+  AUTOTUNE,
+#endif
 };
 
 // NOTE: The AVR toolchain defaults to C++11, where constexpr functions are
@@ -89,7 +102,7 @@ enum class ServiceItem : uint8_t {
 // expression so it works under C++11 without extra init code.
 constexpr uint8_t kServiceMenuItems =
     static_cast<uint8_t>(ENABLE_SERVICE_DRUM_TEST + ENABLE_SERVICE_HEATER_TEST + ENABLE_SERVICE_PID_VIEW +
-                         ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FOPDT_ID);
+                         ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FOPDT_ID + ENABLE_SERVICE_AUTOTUNE);
 static_assert(kServiceMenuItems > 0u, "Service menu enabled but no service tools enabled");
 
 ServiceItem serviceMenuItemByIndex_(uint8_t idx) {
@@ -108,6 +121,9 @@ ServiceItem serviceMenuItemByIndex_(uint8_t idx) {
 #if ENABLE_SERVICE_FOPDT_ID
   if (idx-- == 0u) return ServiceItem::FOPDT_ID;
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+  if (idx-- == 0u) return ServiceItem::AUTOTUNE;
+#endif
 
   // Fallback (should be unreachable due to bounds checks).
 #if ENABLE_SERVICE_DRUM_TEST
@@ -119,11 +135,15 @@ ServiceItem serviceMenuItemByIndex_(uint8_t idx) {
 #elif ENABLE_SERVICE_IO_TEST
   return ServiceItem::IO_TEST;
 #else
+#if ENABLE_SERVICE_FOPDT_ID
   return ServiceItem::FOPDT_ID;
+#else
+  return ServiceItem::AUTOTUNE;
+#endif
 #endif
 }
 
-#if ENABLE_SERVICE_HEATER_TEST || ENABLE_SERVICE_FOPDT_ID
+#if ENABLE_SERVICE_HEATER_TEST || ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE
 void formatDuty3Chars(uint8_t duty, char out[4]) {
   if (duty > 100u) {
     duty = 100u;
@@ -168,7 +188,7 @@ void clearLine20(char line[21]) {
 }
 #endif
 
-#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID
+#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE
 uint16_t scaleClampU16(float value, float scale, uint16_t max_scaled) {
   if (value <= 0.0f) {
     return 0u;
@@ -190,7 +210,7 @@ void writeU8_3(char* dest, uint8_t value) {
 }
 #endif
 
-#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID
+#if ENABLE_SERVICE_PID_VIEW || ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE
 void writeU16Whole3(char* dest, uint16_t whole) {
   if (whole >= 100u) {
     dest[0] = static_cast<char>('0' + ((whole / 100u) % 10u));
@@ -256,6 +276,11 @@ void AppStateMachine::init() {
   state_.service_fopdt_page = 0u;
   state_.service_fopdt_last_update_ms = 0u;
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+  state_.service_autotune_page = 0u;
+  state_.service_autotune_last_update_ms = 0u;
+  state_.service_autotune_start_ms = 0u;
+#endif
 #endif
 
   state_.invalid_key_until_ms = 0;
@@ -277,6 +302,10 @@ bool AppStateMachine::canTransition_(SystemState from, SystemState to) const {
   switch (from) {
     case SystemState::BOOT:
       return (to == SystemState::IDLE) || (to == SystemState::FAULT);
+    case SystemState::FAULT:
+      // Fault handling is fully implemented in Phase 10; for now allow returning
+      // to IDLE after the operator acknowledges.
+      return (to == SystemState::IDLE);
     case SystemState::IDLE:
 #if ENABLE_SERVICE_MENU
       return (to == SystemState::PROGRAM_SELECT) || (to == SystemState::PARAM_EDIT) ||
@@ -287,10 +316,19 @@ bool AppStateMachine::canTransition_(SystemState from, SystemState to) const {
 #endif
     case SystemState::PROGRAM_SELECT:
     case SystemState::PARAM_EDIT:
+      return (to == SystemState::IDLE) || (to == SystemState::FAULT);
 #if ENABLE_SERVICE_MENU
     case SystemState::SERVICE:
-#endif
+#if ENABLE_SERVICE_AUTOTUNE
+      return (to == SystemState::IDLE) || (to == SystemState::FAULT) || (to == SystemState::AUTOTUNE);
+#else
       return (to == SystemState::IDLE) || (to == SystemState::FAULT);
+#endif
+#endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
+    case SystemState::AUTOTUNE:
+      return (to == SystemState::SERVICE) || (to == SystemState::FAULT) || (to == SystemState::IDLE);
+#endif
     default:
       // Other states are implemented in later phases.
       return false;
@@ -302,6 +340,20 @@ void AppStateMachine::onEnter_(SystemState new_state) {
     case SystemState::BOOT:
       lcd.showBootScreen();
       break;
+    case SystemState::FAULT:
+      // Phase 10 introduces the full fault system; keep this minimal and safe.
+      drumControl.stop();
+      heaterControl.disable();
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("FAULT"));
+#if ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE)
+      lcd.setCursor(0, 1);
+      lcd.print(!io.isDoorClosed() ? F("DOOR OPEN") : F("CHECK SYSTEM"));
+#endif
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:ACK"));
+      break;
     case SystemState::IDLE:
       lcd.showMainMenu(state_.menu_selection);
       state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
@@ -311,6 +363,15 @@ void AppStateMachine::onEnter_(SystemState new_state) {
 #if ENABLE_SERVICE_MENU
     case SystemState::SERVICE:
       renderService_();
+      break;
+#endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
+    case SystemState::AUTOTUNE:
+      state_.service_autotune_page = 0u;
+      state_.service_autotune_last_update_ms = 0u;
+      state_.service_autotune_start_ms = millis();
+      pidController.startAutoTune();
+      renderAutoTune_();
       break;
 #endif
     case SystemState::RUNNING_HEAT:
@@ -355,6 +416,15 @@ void AppStateMachine::onExit_(SystemState old_state) {
 #endif
     heaterControl.disable();
   }
+
+#if ENABLE_SERVICE_AUTOTUNE
+  if (old_state == SystemState::AUTOTUNE) {
+    // Safety: never leave AUTOTUNE with heater control active.
+    if (pidController.isAutoTuning() || pidController.isAutoTuneComplete()) {
+      pidController.abortAutoTune();
+    }
+  }
+#endif
 #else
   (void)old_state;
 #endif
@@ -428,6 +498,11 @@ void AppStateMachine::renderService_() {
       renderFopdt_();
       break;
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+    case kServiceViewAutoTunePre:
+      renderAutoTunePre_();
+      break;
+#endif
     default:
       state_.service_view = kServiceViewMenu;
       renderServiceMenu_();
@@ -484,6 +559,11 @@ void AppStateMachine::renderServiceMenu_() {
 #if ENABLE_SERVICE_FOPDT_ID
       case ServiceItem::FOPDT_ID:
         lcd.print(F("FOPDT ID          "));
+        break;
+#endif
+#if ENABLE_SERVICE_AUTOTUNE
+      case ServiceItem::AUTOTUNE:
+        lcd.print(F("AUTO TUNE         "));
         break;
 #endif
       default:
@@ -868,6 +948,204 @@ void AppStateMachine::updateFopdt_() {
   renderFopdt_();
 }
 #endif // ENABLE_SERVICE_FOPDT_ID
+
+#if ENABLE_SERVICE_AUTOTUNE
+void AppStateMachine::renderAutoTunePre_() {
+  const bool door_ok = io.isDoorClosed();
+  const bool sens_ok = tempSensor.isValid();
+
+  const uint16_t pv10 = scaleClampU16(tempSensor.getTemperature(), 10.0f, 9999u);
+  char pv_str[6];
+  writeU16_1dp5(pv_str, pv10);
+  pv_str[5] = '\0';
+
+  lcd.setCursor(0, 0);
+  lcd.print(F("AUTO TUNE RUN~20MIN "));
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("EMPTY DRUM AMB15-30C"));
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("D:"));
+  lcd.print(door_ok ? F("OK") : F("OP"));
+  lcd.print(F(" S:"));
+  lcd.print(sens_ok ? F("OK") : F("ER"));
+  lcd.print(F(" PV:"));
+  lcd.print(pv_str);
+  lcd.print(F("C"));
+  lcd.print(F(" "));
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("A:START B:CANCEL    "));
+}
+
+void AppStateMachine::renderAutoTune_() {
+  if (pidController.isAutoTuneComplete()) {
+    float ku = 0.0f;
+    float tu_s = 0.0f;
+    (void)pidController.getAutoTuneKuTu(ku, tu_s);
+
+    float kp = 0.0f;
+    float ki = 0.0f;
+    float kd = 0.0f;
+    (void)pidController.getAutoTuneResults(kp, ki, kd);
+
+    lcd.setCursor(0, 0);
+    lcd.print(F("AUTOTUNE DONE       "));
+
+    if (state_.service_autotune_page == 0u) {
+      const uint16_t ku10 = scaleClampU16(ku, 10.0f, 9999u);
+      char ku_str[6];
+      writeU16_1dp5(ku_str, ku10);
+      ku_str[5] = '\0';
+
+      const uint16_t tu_u16 = scaleClampU16(tu_s, 1.0f, 999u);
+      char tu_str[4];
+      writeU16Whole3(tu_str, tu_u16);
+      tu_str[3] = '\0';
+
+      lcd.setCursor(0, 1);
+      lcd.print(F("Ku:"));
+      lcd.print(ku_str);
+      lcd.print(F(" Tu:"));
+      lcd.print(tu_str);
+      lcd.print(F("s"));
+      lcd.print(F("    "));
+
+      const uint16_t kp10 = scaleClampU16(kp, 10.0f, 9999u);
+      char kp_str[6];
+      writeU16_1dp5(kp_str, kp10);
+      kp_str[5] = '\0';
+
+      const uint16_t ki100 = scaleClampU16(ki, 100.0f, 65535u);
+      char ki_str[7];
+      writeU16_2dp6(ki_str, ki100);
+      ki_str[6] = '\0';
+
+      lcd.setCursor(0, 2);
+      lcd.print(F("Kp:"));
+      lcd.print(kp_str);
+      lcd.print(F(" Ki:"));
+      lcd.print(ki_str);
+      lcd.print(F("  "));
+
+      lcd.setCursor(0, 3);
+      lcd.print(F("A:SAVE B:REJ OK:>   "));
+      return;
+    }
+
+    const uint16_t kd100 = scaleClampU16(kd, 100.0f, 65535u);
+    char kd_str[7];
+    writeU16_2dp6(kd_str, kd100);
+    kd_str[6] = '\0';
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("Kd:"));
+    lcd.print(kd_str);
+    lcd.print(F("           "));
+
+    lcd.setCursor(0, 2);
+    lcd.print(F("OK:PAGE A:SAVE"));
+    lcd.print(F("      "));
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("B:REJ OK:<"));
+    lcd.print(F("          "));
+    return;
+  }
+
+  // In-progress screen.
+  const uint32_t elapsed_s = (millis() - state_.service_autotune_start_ms) / 1000u;
+  const uint8_t cyc = pidController.getAutoTuneCycleCount();
+
+  const uint8_t rem_cycles = (cyc >= 3u) ? 0u : static_cast<uint8_t>(3u - cyc);
+  uint8_t eta_min = 0u;
+  if (cyc != 0u) {
+    const uint32_t avg_s = elapsed_s / cyc;
+    const uint32_t rem_s = avg_s * rem_cycles;
+    eta_min = static_cast<uint8_t>((rem_s > 5999u) ? 99u : (rem_s / 60u));
+  }
+
+  const uint16_t pv10 = scaleClampU16(tempSensor.getTemperature(), 10.0f, 9999u);
+  char pv_str[6];
+  writeU16_1dp5(pv_str, pv10);
+  pv_str[5] = '\0';
+
+  const uint8_t duty_cmd = pidController.getAutoTuneCommandDuty();
+  char duty_str[4];
+  formatDuty3Chars(duty_cmd, duty_str);
+
+  const uint8_t mm = static_cast<uint8_t>((elapsed_s / 60u) % 100u);
+  const uint8_t ss = static_cast<uint8_t>(elapsed_s % 60u);
+  const char mm1 = static_cast<char>('0' + (mm / 10u));
+  const char mm2 = static_cast<char>('0' + (mm % 10u));
+  const char ss1 = static_cast<char>('0' + (ss / 10u));
+  const char ss2 = static_cast<char>('0' + (ss % 10u));
+
+  lcd.setCursor(0, 0);
+  lcd.print(F("AUTOTUNE            "));
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("CYCLE "));
+  lcd.print(static_cast<char>('0' + ((cyc > 9u) ? 9u : cyc)));
+  lcd.print(F("/3 ETA:"));
+  if (cyc == 0u) {
+    lcd.print(F("--"));
+  } else {
+    lcd.print(static_cast<char>('0' + (eta_min / 10u)));
+    lcd.print(static_cast<char>('0' + (eta_min % 10u)));
+  }
+  lcd.print(F("m   "));
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("TEMP:"));
+  lcd.print(pv_str);
+  lcd.print(F("C DUT:"));
+  lcd.print(duty_str);
+  lcd.print(F(" "));
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("TIME:"));
+  lcd.print(mm1);
+  lcd.print(mm2);
+  lcd.print(F(":"));
+  lcd.print(ss1);
+  lcd.print(ss2);
+  lcd.print(F(" B:ABRT"));
+  lcd.print(F("   "));
+}
+
+void AppStateMachine::updateAutoTuneUi_() {
+  const uint32_t now = millis();
+  if (state_.service_autotune_last_update_ms != 0u &&
+      (now - state_.service_autotune_last_update_ms) < kAutoTuneUiRefreshMs) {
+    return;
+  }
+  state_.service_autotune_last_update_ms = now;
+
+  if (pidController.isAutoTuning()) {
+    pidController.updateAutoTune(tempSensor.getTemperature());
+  }
+
+  // If AutoTune aborted (but not complete), exit appropriately.
+  if (!pidController.isAutoTuning() && !pidController.isAutoTuneComplete()) {
+    const uint8_t reason = pidController.getAutoTuneAbortReason();
+    if (reason == 1u) { // door open -> FAULT (Req 6)
+      transitionTo(SystemState::FAULT);
+      return;
+    }
+
+    state_.service_view = kServiceViewMenu;
+    transitionTo(SystemState::SERVICE);
+    state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+    lcd.setCursor(0, 3);
+    lcd.print(F("AT ABORT            "));
+    return;
+  }
+
+  renderAutoTune_();
+}
+#endif // ENABLE_SERVICE_AUTOTUNE
 #endif // ENABLE_SERVICE_MENU
 
 void AppStateMachine::update() {
@@ -915,6 +1193,22 @@ void AppStateMachine::update() {
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
       state_.service_view == kServiceViewFopdt) {
     updateFopdt_();
+  }
+#endif
+
+#if ENABLE_SERVICE_AUTOTUNE
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewAutoTunePre) {
+    const uint32_t now_ui = millis();
+    if (state_.service_autotune_last_update_ms == 0u ||
+        (now_ui - state_.service_autotune_last_update_ms) >= kAutoTuneUiRefreshMs) {
+      state_.service_autotune_last_update_ms = now_ui;
+      renderAutoTunePre_();
+    }
+  }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::AUTOTUNE) {
+    updateAutoTuneUi_();
   }
 #endif
 #endif
@@ -972,6 +1266,23 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       return;
     }
 #endif
+
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
+    if (state_.current_state == SystemState::AUTOTUNE) {
+      pidController.abortAutoTune();
+      state_.service_view = kServiceViewMenu;
+      transitionTo(SystemState::SERVICE);
+      state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+      lcd.setCursor(0, 3);
+      lcd.print(F("ABORTED             "));
+      return;
+    }
+#endif
+
+    if (state_.current_state == SystemState::FAULT) {
+      transitionTo(SystemState::IDLE);
+      return;
+    }
 
     if (state_.current_state == SystemState::PROGRAM_SELECT || state_.current_state == SystemState::PARAM_EDIT) {
       transitionTo(SystemState::IDLE);
@@ -1140,6 +1451,47 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       }
 #endif
 
+#if ENABLE_SERVICE_AUTOTUNE
+      if (state_.service_view == kServiceViewAutoTunePre) {
+#if ENABLE_SERVICE_FOPDT_ID
+        (void)fopdt; // suppress unused warnings when combined builds toggle flags
+#endif
+        if (key == KeypadInput::Key::START) {
+          const bool door_ok = io.isDoorClosed();
+          const bool sens_ok = tempSensor.isValid();
+          const float pv = tempSensor.getTemperature();
+          const bool ambient_ok = (pv >= 15.0f) && (pv <= 30.0f);
+
+          if (!door_ok || !sens_ok || !ambient_ok) {
+            state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+            lcd.setCursor(0, 3);
+            lcd.print(F("CHECK DOOR/TEMP"));
+            return;
+          }
+
+          // Ensure other service tools are inactive.
+          drumControl.stop();
+#if ENABLE_SERVICE_HEATER_TEST
+          g_heater_test_active = 0u;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+          g_fopdt_active = 0u;
+          fopdt.abort();
+#endif
+          heaterControl.disable();
+
+          state_.service_autotune_page = 0u;
+          state_.service_autotune_last_update_ms = 0u;
+          state_.service_autotune_start_ms = now;
+          transitionTo(SystemState::AUTOTUNE);
+          return;
+        }
+
+        showInvalidKey_();
+        return;
+      }
+#endif
+
       if (state_.service_view != kServiceViewMenu) {
         showInvalidKey_();
         return;
@@ -1204,6 +1556,13 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
             renderService_();
             return;
 #endif
+#if ENABLE_SERVICE_AUTOTUNE
+          case ServiceItem::AUTOTUNE:
+            state_.service_autotune_last_update_ms = 0u;
+            state_.service_view = kServiceViewAutoTunePre;
+            renderService_();
+            return;
+#endif
           default:
             break;
         }
@@ -1213,6 +1572,43 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key) {
       }
 
       showInvalidKey_();
+      return;
+    }
+#endif
+
+// AUTOTUNE state (Phase 8).
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
+    case SystemState::AUTOTUNE: {
+      if (pidController.isAutoTuneComplete()) {
+        if (key == KeypadInput::Key::OK) {
+          state_.service_autotune_page ^= 1u;
+          renderAutoTune_();
+          return;
+        }
+
+        if (key == KeypadInput::Key::START) {
+          float kp = 0.0f;
+          float ki = 0.0f;
+          float kd = 0.0f;
+          if (pidController.getAutoTuneResults(kp, ki, kd)) {
+            pidController.setTunings(kp, ki, kd);
+            eepromStore.requestSavePIDGains(kp, ki, kd);
+            eepromStore.update(now);
+          }
+
+          pidController.endAutoTuneSession();
+          state_.service_view = kServiceViewMenu;
+          transitionTo(SystemState::SERVICE);
+          state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+          lcd.setCursor(0, 3);
+          lcd.print(F("SAVED               "));
+          return;
+        }
+
+        return;
+      }
+
+      // In progress: only STOP aborts (handled above).
       return;
     }
 #endif

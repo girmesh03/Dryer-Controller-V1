@@ -62,6 +62,10 @@ void UILCD::print(const __FlashStringHelper* text) {
   lcd_.print(text);
 }
 
+void UILCD::print(char c) {
+  lcd_.write(static_cast<uint8_t>(c));
+}
+
 void UILCD::showBootScreen() {
   state_.screen = SCREEN_BOOT;
   state_.dirty = 1;
