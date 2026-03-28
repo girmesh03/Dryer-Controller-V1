@@ -50,14 +50,14 @@ This document summarizes what was implemented in **Phase 4** and the patterns Ph
 ## Hardware Checkpoint (User Action)
 
 Run and report:
-- `pio run -e nanoatmega328`
-- `pio run -e nanoatmega328 -t upload`
+- `pio run -e esp32`
+- `pio run -e esp32 -t upload`
 
 Verify on bench:
 - Enter Service menu: `* * 5`
 - Start Drum Test and observe D10/D11 LEDs:
+  - ESP32 relay outputs: `PIN_MOTOR_FWD_RELAY` (GPIO27) / `PIN_MOTOR_REV_RELAY` (GPIO26)
   - Forward ON for 50s, then both OFF for 5s, then Reverse ON for 50s, repeat
   - Forward and Reverse never ON at the same time
 - Open door during motion: both outputs OFF within ~100ms
 - Close door: drum does not restart automatically (manual restart required)
-

@@ -2,13 +2,36 @@
 #define CONFIG_BUILD_H
 
 #include <Arduino.h>
-#include <avr/pgmspace.h>
+#include <pgmspace.h>
 
 // Feature flags (compile-time)
 //  - Set to 0 to compile out the Service menu/tools and save Flash/SRAM.
 //  - Override from PlatformIO build_flags: -DENABLE_SERVICE_MENU=0
 #ifndef ENABLE_SERVICE_MENU
 #define ENABLE_SERVICE_MENU 1
+#endif
+
+// Operator Settings Menu (compile-time)
+//  - Override from PlatformIO build_flags: -DENABLE_SETTINGS_MENU=0
+#ifndef ENABLE_SETTINGS_MENU
+#define ENABLE_SETTINGS_MENU 1
+#endif
+
+// Program editor inside the Settings menu (compile-time)
+//  - Override from PlatformIO build_flags: -DENABLE_PROGRAM_EDITOR=0
+#if ENABLE_SETTINGS_MENU
+#ifndef ENABLE_PROGRAM_EDITOR
+#define ENABLE_PROGRAM_EDITOR 1
+#endif
+#else
+#define ENABLE_PROGRAM_EDITOR 0
+#endif
+
+// Cycle execution UI/logic (compile-time)
+//  - Operator build should keep this enabled.
+//  - Service/commissioning builds may disable to save Flash: -DENABLE_CYCLE_EXECUTION=0
+#ifndef ENABLE_CYCLE_EXECUTION
+#define ENABLE_CYCLE_EXECUTION 1
 #endif
 
 // Granular Service feature flags (compile-time)
@@ -33,6 +56,9 @@
 #ifndef ENABLE_SERVICE_AUTOTUNE
 #define ENABLE_SERVICE_AUTOTUNE 1
 #endif
+#ifndef ENABLE_SERVICE_FACTORY_RESET
+#define ENABLE_SERVICE_FACTORY_RESET 1
+#endif
 #else
 #define ENABLE_SERVICE_DRUM_TEST 0
 #define ENABLE_SERVICE_HEATER_TEST 0
@@ -40,6 +66,7 @@
 #define ENABLE_SERVICE_IO_TEST 0
 #define ENABLE_SERVICE_FOPDT_ID 0
 #define ENABLE_SERVICE_AUTOTUNE 0
+#define ENABLE_SERVICE_FACTORY_RESET 0
 #endif
 
 // Firmware identification (store in Flash / PROGMEM)
@@ -47,10 +74,11 @@ constexpr char FW_VERSION[] PROGMEM = "1.0.0";
 constexpr char BUILD_DATE[] PROGMEM = __DATE__;
 constexpr char BUILD_TIME[] PROGMEM = __TIME__;
 
-// Memory limits (85% of Arduino Nano resources)
-constexpr uint16_t FLASH_LIMIT = 25500; // 85% of 30 KB usable
-constexpr uint16_t SRAM_LIMIT = 1740;   // 85% of 2 KB
-constexpr uint16_t EEPROM_LIMIT = 870;  // 85% of 1 KB
+// Legacy Arduino Nano memory limits (kept for reference).
+// NOTE: This project now targets ESP32, and these limits are not enforced.
+constexpr uint16_t FLASH_LIMIT = 25500;
+constexpr uint16_t SRAM_LIMIT = 1740;
+constexpr uint16_t EEPROM_LIMIT = 870;
 
 // Cooperative scheduler timing (milliseconds)
 constexpr uint8_t FAST_LOOP_PERIOD = 100;    // 10 Hz

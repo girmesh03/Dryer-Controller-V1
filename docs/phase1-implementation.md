@@ -2,25 +2,28 @@
 
 This document summarizes what was implemented in **Phase 1** and the resulting architectural patterns that Phase 2+ builds on.
 
+> Note: The hardware target is now **ESP32-WROOM-32** (`esp32doit-devkit-v1`). See `docs/esp32-migration.md` for the updated pin map, PlatformIO environment, and ESP32-specific notes. Any Arduino Nano memory-limit discussion below is historical.
+
 ## Build System
 
-- **PlatformIO environment:** `nanoatmega328` (Arduino Nano ATmega328P).
+- **PlatformIO environment:** `esp32` (ESP32-WROOM-32 / DOIT DEVKIT V1).
 - **Pinned libraries:** LCD, Keypad, OneWire/DallasTemperature, PID, plus `Wire` + `EEPROM`.
-- **Size optimization flags:** `-Os`, `-flto`, `-ffunction-sections`, `-fdata-sections`, link `--gc-sections`, `--relax`, `-mcall-prologues`.
-- **Memory enforcement:** `check_memory.py` runs post-link and hard-fails if:
-  - Flash > 25500 bytes
-  - SRAM > 1740 bytes
-  - EEPROM reserved map > 870 bytes (map is currently reserved at 512 bytes)
-- **Generated build header (ignored):** `include/generated/build_memory.h` written by `check_memory.py`.
+- **Size optimization flags:** `-Os`, `-ffunction-sections`, `-fdata-sections`, link `--gc-sections`.
+- **Memory enforcement:** Arduino Nano `check_memory.py` enforcement is **not used** on ESP32.
 
 ## Configuration Headers
 
 - `include/config_pins.h`
-  - Door input: `D6` (`INPUT_PULLUP`, `LOW=open`, `HIGH=closed`)
-  - Temperature sensor: `D12` (OneWire/DS18B20 later)
-  - Relays: `D9` heater, `D10` motor fwd, `D11` motor rev (**active-HIGH**)
-  - Keypad: rows `A0..A3`, cols `D2..D5`
-  - Buzzer: `D8` (tone output)
+  - Door input: `GPIO33` (`INPUT_PULLUP`, `LOW=closed`, `HIGH=open`)
+  - Temperature sensor: `GPIO32` (OneWire/DS18B20)
+  - Relays (**active-LOW**):
+    - `GPIO14` heater, `GPIO27` motor fwd, `GPIO26` motor rev
+    - `GPIO25` reserved aux relay (future use)
+  - Keypad:
+    - rows `GPIO16/GPIO17/GPIO18/GPIO19` (internal pull-ups)
+    - cols `GPIO13/GPIO4/GPIO5/GPIO15` (includes strapping pins; do not hold keys at reset)
+  - Buzzer: `GPIO23` (tone output)
+  - LCD I2C: `SDA=GPIO21`, `SCL=GPIO22`
 
 - `include/config_build.h`
   - Firmware version/date/time in **PROGMEM**
@@ -32,7 +35,7 @@ This document summarizes what was implemented in **Phase 1** and the resulting a
 
 - `include/io_abstraction.h` + `lib/io_abstraction/io_abstraction.cpp`
 - Safe defaults:
-  - All relay outputs forced **LOW** before pinMode OUTPUT.
+  - All relay outputs forced **HIGH** before pinMode OUTPUT (active-LOW OFF state).
   - Door input configured as `INPUT_PULLUP`.
 - Door input debounced at IO layer with minimum stable time.
 - Direction interlock + dead-time:
@@ -58,8 +61,9 @@ This document summarizes what was implemented in **Phase 1** and the resulting a
 
 ## Watchdog + Scheduler (main.cpp)
 
-- Watchdog reset cause captured from `MCUSR` at startup and watchdog disabled before re-enabling to prevent reset loops.
-- Watchdog enabled with a **2s** timeout after initialization.
+- Reset cause captured at startup:
+  - ESP32 uses `esp_reset_reason()` and maps watchdog resets to the boot screen indicator.
+- Watchdog enabled with a **2s** nominal timeout after initialization and kicked in `loop()`.
 - Cooperative scheduler uses `millis()` and runs:
   - Fast loop: IO update (100ms in Phase 1; keypad/UI will add faster ticks in Phase 2)
   - Medium loop: reserved for future (Phase 2 LCD refresh)
@@ -67,7 +71,6 @@ This document summarizes what was implemented in **Phase 1** and the resulting a
 
 ## Bench Expectations (Phase 1)
 
-- On power-up, D9/D10/D11 remain **LOW**.
+- On power-up, relay outputs remain **OFF** (active-LOW → outputs driven **HIGH** on `PIN_HEATER_RELAY`, `PIN_MOTOR_FWD_RELAY`, `PIN_MOTOR_REV_RELAY`, `PIN_AUX_RELAY`).
 - Door changes print to Serial (`DOOR: OPEN/CLOSED`) for basic verification.
 - Watchdog reset can be tested by intentionally hanging `loop()` (temporary) and verifying reset.
-

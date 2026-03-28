@@ -2,6 +2,8 @@
 
 This document summarizes what was implemented in **Phase 2** and the patterns that Phase 3+ builds on.
 
+> Note: The hardware target is now **ESP32-WROOM-32** (`esp32doit-devkit-v1`). See `docs/esp32-migration.md` for the updated pin map and PlatformIO environment.
+
 ## What Was Added
 
 ### `ui_lcd` module
@@ -73,13 +75,7 @@ This document summarizes what was implemented in **Phase 2** and the patterns th
 
 - Serial debug is disabled by default:
   - `-DENABLE_SERIAL_DEBUG=0`
-  - Serial buffers reduced:
-    - `-DSERIAL_RX_BUFFER_SIZE=32`
-    - `-DSERIAL_TX_BUFFER_SIZE=32`
 
 ## Hardware Checkpoint Result (User Reported)
 
-- Flash: 8166 bytes (26.6% of 30720)
-- SRAM:  558 bytes (27.2% of 2048)
-- EEPROM reserved map: 512 bytes (50.0% of 1024; limit 870 bytes)
-
+These figures were collected on the original Arduino Nano target and are no longer applicable after migrating to ESP32.

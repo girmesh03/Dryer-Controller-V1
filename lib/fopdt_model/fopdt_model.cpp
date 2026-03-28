@@ -1,7 +1,7 @@
 #include "fopdt_model.h"
 
 #include <Arduino.h>
-#include <avr/pgmspace.h>
+#include <pgmspace.h>
 
 namespace {
 constexpr uint8_t kBaselineDurationS = 30u;

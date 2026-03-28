@@ -1,7 +1,7 @@
 #include "pid_control.h"
 
 #include <Arduino.h>
-#include <avr/pgmspace.h>
+#include <pgmspace.h>
 
 #include "config_build.h"
 

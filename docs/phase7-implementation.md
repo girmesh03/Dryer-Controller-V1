@@ -65,9 +65,8 @@ This document summarizes what was implemented in **Phase 7** and how it integrat
 ## Hardware Checkpoint (User Action)
 
 Run and report:
-- Service build (Phase 7 tools): `pio run -e nanoatmega328`
-- Upload: `pio run -e nanoatmega328 -t upload`
-- Operator build (service compiled out): `pio run -e nano_operator`
+- Build: `pio run -e esp32`
+- Upload: `pio run -e esp32 -t upload`
 
 Verify on bench:
 - Enter Service menu: `* * 5`
@@ -80,37 +79,9 @@ Verify on bench:
   - Press `A` to save
 - Reboot and verify persisted gains/values (PID VIEW should show the new gains)
 
-## Practical Workflow (Two Builds)
+## Practical Workflow (Single Build)
 
-To stay within Arduino Nano Flash limits while still supporting commissioning tools:
+On ESP32, the firmware is intended to be built as a single image with both operator flows and commissioning tools available:
 
-- **Day-to-day operation:** upload `nano_operator` (service menu/tools compiled out).
-  - Auto Mode: program select → optional temporary parameter edit → run PID using PID gains stored in EEPROM.
-  - Manual Mode: parameter edit → run PID using PID gains stored in EEPROM against the setpoint.
-- **Commissioning / tuning / diagnostics:** temporarily upload `nanoatmega328` (service build) with only the needed service tool(s) enabled (e.g. FOPDT).
-  - Run the tool and **save** results (writes to EEPROM).
-  - Then upload `nano_operator` again for normal operation.
-
-Both builds share the same EEPROM layout/magic/version, so PID/FOPDT values saved by a service build are loaded and used by the operator build at startup.
-
-## Build-Time Flags (Memory Optimization)
-
-- `ENABLE_SERVICE_MENU` (default `1`)
-  - Set to `0` to compile out the service menu/tools (saves Flash/SRAM).
-  - When disabled: `FOPDT ID` is removed from the build and `g_fopdt_active` is not used.
-
-### Granular Service tool flags
-
-When `ENABLE_SERVICE_MENU=1`, each tool can be compiled in/out independently:
-- `ENABLE_SERVICE_DRUM_TEST`
-- `ENABLE_SERVICE_HEATER_TEST`
-- `ENABLE_SERVICE_PID_VIEW`
-- `ENABLE_SERVICE_IO_TEST`
-- `ENABLE_SERVICE_FOPDT_ID`
-- `ENABLE_SERVICE_AUTOTUNE`
-
-The default `platformio.ini` service environments enable only one tool at a time to stay under Flash limits:
-- `nanoatmega328`: `FOPDT ID`
-- `nano_autotune`: `AUTO TUNE` (Phase 8)
-
-Enable other tools only when you need them for bench work.
+- Use Service menu tools (e.g., **FOPDT ID**) to identify the process and **save** values to EEPROM.
+- Day-to-day operation then uses the **same EEPROM-stored PID/FOPDT values** automatically at startup.

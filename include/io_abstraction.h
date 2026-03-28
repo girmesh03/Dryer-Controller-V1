@@ -11,10 +11,11 @@ public:
   // Inputs (debounced)
   bool isDoorClosed() const;
 
-  // Outputs (active-HIGH, interlocks enforced)
+  // Outputs (active-LOW, interlocks enforced)
   void setHeaterRelay(bool state);
   void setMotorForward(bool state);
   void setMotorReverse(bool state);
+  void setAuxRelay(bool state); // Reserved relay (future use)
 
   // Safety override
   void emergencyStop();
@@ -39,6 +40,7 @@ private:
     uint8_t heater_state : 1;
     uint8_t motor_fwd_state : 1;
     uint8_t motor_rev_state : 1;
+    uint8_t aux_state : 1;
   } state_;
 };
 

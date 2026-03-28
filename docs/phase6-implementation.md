@@ -43,8 +43,8 @@ This document summarizes what was implemented in **Phase 6** and how it integrat
 ## Hardware Checkpoint (User Action)
 
 Run and report:
-- `pio run -e nanoatmega328`
-- `pio run -e nanoatmega328 -t upload`
+- `pio run -e esp32`
+- `pio run -e esp32 -t upload`
 
 Verify on bench:
 - Enter Service menu: `* * 5`
@@ -53,6 +53,4 @@ Verify on bench:
 
 ## Build-Time Flags (Memory Optimization)
 
-- `ENABLE_SERVICE_MENU` (default `1`)
-  - Set to `0` to compile out the Service menu/tools (saves Flash/SRAM).
-  - When disabled: the `* * 5` service entry sequence is inactive and service screens are removed from the build.
+On ESP32, feature-splitting flags are no longer required for Flash/SRAM reasons; the firmware is intended to ship with all features enabled.

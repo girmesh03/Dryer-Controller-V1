@@ -10,7 +10,7 @@ This document summarizes what was implemented in **Phase 3** and the patterns Ph
   - `include/ds18b20_sensor.h`
   - `lib/ds18b20_sensor/ds18b20_sensor.cpp`
 - Library usage:
-  - `OneWire` on `PIN_TEMP_SENSOR` (D12)
+  - `OneWire` on `PIN_TEMP_SENSOR` (ESP32: GPIO32)
   - `DallasTemperature` for DS18B20 access
 - Non-blocking read architecture:
   - Internal FSM states: `IDLE → REQUEST_CONVERSION → WAIT_CONVERSION → READ_DATA`
@@ -59,11 +59,10 @@ Temperature formatting is done with a small fixed-point style render (deci-degre
 ## Hardware Checkpoint (User Action)
 
 Run and report:
-- `pio run -e nanoatmega328`
-- `pio run -e nanoatmega328 -t upload`
+- `pio run -e esp32`
+- `pio run -e esp32 -t upload`
 
 Verify on bench:
 - Temperature appears on the main menu line 4 and updates every second.
 - Unplug DS18B20: `SENSOR FAULT` appears within ~2 seconds.
 - Reconnect DS18B20: temperature recovers and resumes updating.
-

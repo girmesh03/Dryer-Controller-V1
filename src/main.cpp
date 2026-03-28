@@ -1,7 +1,18 @@
 #include <Arduino.h>
+#include <Wire.h>
 
+#ifndef LED_BUILTIN
+#define LED_BUILTIN 2
+#endif
+
+#if defined(__AVR__)
 #include <avr/io.h>
 #include <avr/wdt.h>
+#endif
+#if defined(ESP32)
+#include <esp_system.h>
+#include <esp_task_wdt.h>
+#endif
 
 #include "config_build.h"
 #include "config_pins.h"
@@ -25,7 +36,6 @@
 IOAbstraction io;
 EEPROMStore eepromStore;
 
-uint8_t g_reset_flags_mcusr = 0;
 bool g_was_watchdog_reset = false;
 
 // Phase 10 will replace this placeholder with the real fault system.
@@ -37,6 +47,10 @@ uint8_t g_heater_test_active = 0u;
 #endif
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
 uint8_t g_fopdt_active = 0u;
+#endif
+
+#if ENABLE_SETTINGS_MENU
+EEPROMStore::Settings g_settings;
 #endif
 
 // Phase 6+ will manage this setpoint during RUNNING_HEAT.
@@ -53,41 +67,115 @@ PIDControl pidController;
 FOPDTModel fopdt;
 #endif
 
-namespace {
+namespace
+{
 #if ENABLE_SERIAL_DEBUG
-void printResetFlags(uint8_t flags) {
-  Serial.print(F("RESET FLAGS (MCUSR)=0x"));
-  Serial.println(flags, HEX);
-
-  if (flags == 0) {
-    Serial.println(F("Reset cause: POWER-ON (assumed)"));
-    return;
-  }
-
-  if (flags & _BV(PORF)) {
-    Serial.println(F("Reset cause: POWER-ON"));
-  }
-  if (flags & _BV(EXTRF)) {
-    Serial.println(F("Reset cause: EXTERNAL"));
-  }
-  if (flags & _BV(BORF)) {
-    Serial.println(F("Reset cause: BROWN-OUT"));
-  }
-  if (flags & _BV(WDRF)) {
-    Serial.println(F("Reset cause: WATCHDOG"));
-  }
-}
+  void printResetCause_()
+  {
+#if defined(ESP32)
+    const esp_reset_reason_t reason = esp_reset_reason();
+    Serial.print(F("Reset cause: "));
+    switch (reason)
+    {
+    case ESP_RST_POWERON:
+      Serial.println(F("POWER-ON"));
+      break;
+    case ESP_RST_BROWNOUT:
+      Serial.println(F("BROWN-OUT"));
+      break;
+    case ESP_RST_EXT:
+      Serial.println(F("EXTERNAL"));
+      break;
+    case ESP_RST_SW:
+      Serial.println(F("SOFTWARE"));
+      break;
+    case ESP_RST_PANIC:
+      Serial.println(F("PANIC"));
+      break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+      Serial.println(F("WATCHDOG"));
+      break;
+    default:
+      Serial.println(F("UNKNOWN"));
+      break;
+    }
+#elif defined(__AVR__)
+    const uint8_t flags = MCUSR;
+    Serial.print(F("RESET FLAGS (MCUSR)=0x"));
+    Serial.println(flags, HEX);
+    if (flags & _BV(PORF))
+      Serial.println(F("Reset cause: POWER-ON"));
+    if (flags & _BV(EXTRF))
+      Serial.println(F("Reset cause: EXTERNAL"));
+    if (flags & _BV(BORF))
+      Serial.println(F("Reset cause: BROWN-OUT"));
+    if (flags & _BV(WDRF))
+      Serial.println(F("Reset cause: WATCHDOG"));
+#else
+    Serial.println(F("Reset cause: UNKNOWN"));
 #endif
+  }
+#endif
+
+  void captureResetCause_()
+  {
+#if defined(__AVR__)
+    const uint8_t flags = MCUSR;
+    g_was_watchdog_reset = (flags & _BV(WDRF)) != 0;
+    MCUSR = 0;
+    wdt_disable();
+#elif defined(ESP32)
+    const esp_reset_reason_t reason = esp_reset_reason();
+    g_was_watchdog_reset = (reason == ESP_RST_TASK_WDT) || (reason == ESP_RST_INT_WDT) || (reason == ESP_RST_WDT);
+#else
+    g_was_watchdog_reset = false;
+#endif
+  }
+
+  void watchdogInit_()
+  {
+#if defined(__AVR__)
+    wdt_enable(WDTO_2S);
+#elif defined(ESP32)
+#if defined(ESP_IDF_VERSION_MAJOR) && (ESP_IDF_VERSION_MAJOR >= 5)
+    esp_task_wdt_config_t cfg = {};
+    cfg.timeout_ms = WATCHDOG_TIMEOUT_MS;
+    cfg.idle_core_mask = 0u;
+    cfg.trigger_panic = false;
+    (void)esp_task_wdt_init(&cfg);
+#else
+    const int timeout_s = static_cast<int>((WATCHDOG_TIMEOUT_MS + 999u) / 1000u);
+    (void)esp_task_wdt_init(timeout_s, true);
+#endif
+    (void)esp_task_wdt_add(NULL);
+#endif
+  }
+
+  inline void watchdogKick_()
+  {
+#if defined(__AVR__)
+    wdt_reset();
+#elif defined(ESP32)
+    (void)esp_task_wdt_reset();
+#endif
+  }
 } // namespace
 
-void setup() {
-  // Capture reset cause before clearing, and disable watchdog to avoid reset loops.
-  g_reset_flags_mcusr = MCUSR;
-  g_was_watchdog_reset = (g_reset_flags_mcusr & _BV(WDRF)) != 0;
-  MCUSR = 0;
-  wdt_disable();
+void setup()
+{
+  captureResetCause_();
+
+#if defined(ESP32)
+  // Ensure I2C uses the configured pins (SDA/SCL).
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+#endif
 
   eepromStore.init();
+#if ENABLE_SETTINGS_MENU
+  (void)eepromStore.loadSettings(g_settings);
+#endif
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
   // Phase 7.4: load persisted FOPDT parameters (even if not used immediately).
   {
@@ -105,7 +193,8 @@ void setup() {
     float kp = 0.0f;
     float ki = 0.0f;
     float kd = 0.0f;
-    if (eepromStore.loadPIDGains(kp, ki, kd)) {
+    if (eepromStore.loadPIDGains(kp, ki, kd))
+    {
       pidController.setTunings(kp, ki, kd);
     }
   }
@@ -117,6 +206,9 @@ void setup() {
   fopdt.init();
 #endif
   lcd.init();
+#if ENABLE_SETTINGS_MENU
+  lcd.setTempUnit(g_settings.temp_unit);
+#endif
   keypad.init();
   app.init();
 
@@ -124,7 +216,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println(F("Industrial Dryer Controller - Phase 6"));
-  printResetFlags(g_reset_flags_mcusr);
+  printResetCause_();
 
   Serial.print(F("EEPROM CRC valid: "));
   Serial.println(eepromStore.isValid() ? F("YES") : F("NO"));
@@ -135,12 +227,13 @@ void setup() {
   digitalWrite(LED_BUILTIN, LOW);
 
   // Enable watchdog after initialization completes.
-  wdt_enable(WDTO_2S);
+  watchdogInit_();
 }
 
-void loop() {
+void loop()
+{
   // Reset watchdog - must be called every loop iteration
-  wdt_reset();
+  watchdogKick_();
   const uint32_t now = millis();
 
   static uint32_t last_keypad_ms = 0;
@@ -154,24 +247,34 @@ void loop() {
   static bool last_door_closed = true;
 
   // Keypad scan loop: 20 Hz (50ms)
-  if (now - last_keypad_ms >= 50u) {
+  if (now - last_keypad_ms >= 50u)
+  {
     last_keypad_ms = now;
     keypad.update();
 
     const auto key = keypad.getKey();
-    if (key != KeypadInput::Key::NONE) {
+    if (key != KeypadInput::Key::NONE)
+    {
+#if ENABLE_SETTINGS_MENU
+      if (g_settings.sound_enabled != 0u)
+      {
+        io.beepKey();
+      }
+#endif
       app.handleKeyPress(key);
     }
   }
 
   // IO loop: 20 Hz (50ms) for door response; debounce remains >=50ms.
-  if (now - last_io_ms >= 50u) {
+  if (now - last_io_ms >= 50u)
+  {
     last_io_ms = now;
     io.update();
 
     // Door state change reporting (useful for Phase 1 bench verification).
     const bool door_closed = io.isDoorClosed();
-    if (door_closed != last_door_closed) {
+    if (door_closed != last_door_closed)
+    {
       last_door_closed = door_closed;
 #if ENABLE_SERIAL_DEBUG
       Serial.println(door_closed ? F("DOOR: CLOSED") : F("DOOR: OPEN"));
@@ -180,13 +283,15 @@ void loop() {
   }
 
   // App state machine: 10 Hz (100ms)
-  if (now - last_app_ms >= FAST_LOOP_PERIOD) {
+  if (now - last_app_ms >= FAST_LOOP_PERIOD)
+  {
     last_app_ms = now;
     app.update();
   }
 
   // Drum control: 10 Hz (100ms)
-  if (now - last_drum_ms >= FAST_LOOP_PERIOD) {
+  if (now - last_drum_ms >= FAST_LOOP_PERIOD)
+  {
     last_drum_ms = now;
     drumControl.update();
 
@@ -196,10 +301,12 @@ void loop() {
   }
 
   // Heater control: 10 Hz (100ms)
-  if (now - last_heater_ms >= FAST_LOOP_PERIOD) {
+  if (now - last_heater_ms >= FAST_LOOP_PERIOD)
+  {
     last_heater_ms = now;
 
-    if (tempSensor.isValid() && app.getCurrentState() == SystemState::RUNNING_HEAT) {
+    if (tempSensor.isValid() && app.getCurrentState() == SystemState::RUNNING_HEAT)
+    {
       const float temp_c = tempSensor.getTemperature();
       const float pid_out = pidController.compute(temp_c); // 0-100%
       g_setpoint_c = pidController.getTargetSetpoint();
@@ -211,19 +318,22 @@ void loop() {
   }
 
   // DS18B20 state machine: 4 Hz (250ms)
-  if (now - last_temp_ms >= MEDIUM_LOOP_PERIOD) {
+  if (now - last_temp_ms >= MEDIUM_LOOP_PERIOD)
+  {
     last_temp_ms = now;
     tempSensor.update();
   }
 
   // LCD refresh: >= 5 Hz (200ms)
-  if (now - last_lcd_ms >= 200u) {
+  if (now - last_lcd_ms >= 200u)
+  {
     last_lcd_ms = now;
     lcd.update();
   }
 
   // Slow tick: EEPROM deferred writes, diagnostics, heartbeat (1 Hz).
-  if (now - last_slow_ms >= SLOW_LOOP_PERIOD) {
+  if (now - last_slow_ms >= SLOW_LOOP_PERIOD)
+  {
     last_slow_ms = now;
     eepromStore.update(now);
 

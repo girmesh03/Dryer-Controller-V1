@@ -57,12 +57,12 @@ Heater energization is permitted only when all conditions are met:
 ## Hardware Checkpoint (User Action)
 
 Run and report:
-- `pio run -e nanoatmega328`
-- `pio run -e nanoatmega328 -t upload`
+- `pio run -e esp32`
+- `pio run -e esp32 -t upload`
 
 Verify on bench:
 - Enter Service menu: `* * 5`
-- Select `HEATER TEST`, set duty 0/50/100, observe D9 output behavior
+- Select `HEATER TEST`, set duty 0/50/100, observe `PIN_HEATER_RELAY` output behavior (ESP32: GPIO14)
 - Note: with 10s minimum ON/OFF times, 50% duty will be enforced as a longer-period pattern (average 50%), not 5s ON / 5s OFF.
 - Open door: heater output drops immediately
 - Sensor disconnect: heater output forced OFF

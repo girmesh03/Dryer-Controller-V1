@@ -38,6 +38,7 @@ void UILCD::init() {
   state_.last_temp_deci_c = 32767;
   state_.dirty = 1;
   state_.temp_valid = 0;
+  state_.temp_unit = 0;
   line_buffer_[0] = '\0';
 
   lcd_.init();
@@ -84,6 +85,13 @@ void UILCD::showMainMenu(uint8_t selection) {
   state_.dirty = 0;
 }
 
+void UILCD::setTempUnit(uint8_t unit) {
+  state_.temp_unit = (unit != 0u) ? 1u : 0u;
+  // Force a refresh on next showTemperature() call.
+  state_.last_temp_deci_c = 32767;
+  state_.temp_valid = 1u;
+}
+
 void UILCD::showTemperature(float temp_c, bool valid) {
   // Line 4 (row index 3) is reserved for live temperature / sensor health.
   if (!valid) {
@@ -99,44 +107,71 @@ void UILCD::showTemperature(float temp_c, bool valid) {
     return;
   }
 
-  const int16_t deci =
+  const int16_t deci_c =
       static_cast<int16_t>(temp_c * 10.0f + ((temp_c >= 0.0f) ? 0.5f : -0.5f));
 
-  if (state_.temp_valid != 0u && state_.last_temp_deci_c == deci) {
+  int16_t disp = deci_c;
+  char unit_char = 'C';
+  const uint8_t unit = state_.temp_unit;
+
+  if (unit != 0u) {
+    // Display Fahrenheit, rounded to nearest whole degree (Req 36).
+    const int32_t d = static_cast<int32_t>(deci_c);
+    const int32_t deci_f = (d * 9 + ((d >= 0) ? 2 : -2)) / 5 + 320; // °F * 10
+    const int16_t whole_f = static_cast<int16_t>((deci_f + ((deci_f >= 0) ? 5 : -5)) / 10);
+    disp = whole_f;
+    unit_char = 'F';
+  }
+
+  if (state_.temp_valid != 0u && state_.last_temp_deci_c == disp) {
     return;
   }
 
   state_.temp_valid = 1u;
-  state_.last_temp_deci_c = deci;
+  state_.last_temp_deci_c = disp;
 
   clearLine(line_buffer_);
   static const char kPrefix[] PROGMEM = "TEMP: ";
   writeProgmemToLine(line_buffer_, 0u, kPrefix);
 
   uint8_t pos = 6u; // after "TEMP: "
-  uint16_t abs_deci = static_cast<uint16_t>((deci < 0) ? -deci : deci);
-  if (deci < 0) {
+  uint16_t abs_val = static_cast<uint16_t>((disp < 0) ? -disp : disp);
+  if (disp < 0) {
     line_buffer_[pos++] = '-';
   }
 
-  const uint16_t whole = static_cast<uint16_t>(abs_deci / 10u);
-  const uint8_t frac = static_cast<uint8_t>(abs_deci % 10u);
+  if (unit == 0u) {
+    const uint16_t whole = static_cast<uint16_t>(abs_val / 10u);
+    const uint8_t frac = static_cast<uint8_t>(abs_val % 10u);
 
-  if (whole >= 100u) {
-    line_buffer_[pos++] = static_cast<char>('0' + ((whole / 100u) % 10u));
-    line_buffer_[pos++] = static_cast<char>('0' + ((whole / 10u) % 10u));
-    line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
-  } else if (whole >= 10u) {
-    line_buffer_[pos++] = static_cast<char>('0' + ((whole / 10u) % 10u));
-    line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
+    if (whole >= 100u) {
+      line_buffer_[pos++] = static_cast<char>('0' + ((whole / 100u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + ((whole / 10u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
+    } else if (whole >= 10u) {
+      line_buffer_[pos++] = static_cast<char>('0' + ((whole / 10u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
+    } else {
+      line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
+    }
+
+    line_buffer_[pos++] = '.';
+    line_buffer_[pos++] = static_cast<char>('0' + (frac % 10u));
   } else {
-    line_buffer_[pos++] = static_cast<char>('0' + (whole % 10u));
+    // Fahrenheit: whole degrees.
+    if (abs_val >= 100u) {
+      line_buffer_[pos++] = static_cast<char>('0' + ((abs_val / 100u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + ((abs_val / 10u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + (abs_val % 10u));
+    } else if (abs_val >= 10u) {
+      line_buffer_[pos++] = static_cast<char>('0' + ((abs_val / 10u) % 10u));
+      line_buffer_[pos++] = static_cast<char>('0' + (abs_val % 10u));
+    } else {
+      line_buffer_[pos++] = static_cast<char>('0' + (abs_val % 10u));
+    }
   }
-
-  line_buffer_[pos++] = '.';
-  line_buffer_[pos++] = static_cast<char>('0' + (frac % 10u));
   line_buffer_[pos++] = static_cast<char>(0xDF); // degree symbol on HD44780
-  line_buffer_[pos++] = 'C';
+  line_buffer_[pos++] = unit_char;
 
   lcd_.setCursor(0, 3);
   lcd_.print(line_buffer_);

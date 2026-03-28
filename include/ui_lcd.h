@@ -14,6 +14,7 @@ public:
   void showBootScreen();
   void showMainMenu(uint8_t selection);
   void showTemperature(float temp_c, bool valid);
+  void setTempUnit(uint8_t unit); // 0=C, 1=F (display only)
 
   void clear();
   void setCursor(uint8_t col, uint8_t row);
@@ -31,6 +32,7 @@ private:
     int16_t last_temp_deci_c;
     uint8_t dirty : 1;
     uint8_t temp_valid : 1;
+    uint8_t temp_unit : 1;
   } state_;
 
   void renderBoot_();

@@ -44,21 +44,15 @@ This document summarizes what was implemented in **Phase 8** and how it integrat
 - `src/main.cpp` loads PID gains at boot via `EEPROMStore::loadPIDGains(...)` and applies them with `pidController.setTunings(...)`.
 - EEPROM integrity is protected by the existing **reserved-map CRC8** scheme (global CRC in header).
 
-### Build environments (memory workflow)
+### Build workflow
 
-To keep Flash under the 85% limit while still supporting commissioning tools:
-
-- `nano_operator`: day-to-day build (service menu/tools compiled out)
-- `nano_autotune`: service build that compiles **AUTO TUNE only**
-- `nanoatmega328`: service build that compiles **FOPDT ID only**
-
-All builds share the same EEPROM layout/magic/version, so gains saved by a service build are loaded by `nano_operator`.
+On ESP32, Flash/SRAM headroom allows building a **single firmware image** with both operator flows and commissioning tools enabled. PID gains saved by AutoTune are stored in EEPROM and loaded at startup.
 
 ## Hardware Checkpoint (User Action)
 
-Build and upload AutoTune service firmware:
-- `pio run -e nano_autotune`
-- `pio run -e nano_autotune -t upload`
+Build and upload:
+- `pio run -e esp32`
+- `pio run -e esp32 -t upload`
 
 Bench verify:
 - Enter Service menu: `* * 5`
@@ -69,15 +63,5 @@ Bench verify:
 - When complete, press `A` to save
 - Wait **≥5 seconds** before power-cycling (EEPROM deferred write rate-limit)
 
-Then return to operator build:
-- `pio run -e nano_operator -t upload`
-
 To verify saved gains after reboot:
-- Temporarily enable `PID VIEW` in a service build (build_flags) and check displayed tunings, or enable Serial debug output.
-
-## Build-Time Flags (Memory Optimization)
-
-- `ENABLE_SERVICE_MENU` (default `1`)
-  - Set to `0` to compile out service menu/tools.
-- `ENABLE_SERVICE_AUTOTUNE`
-  - Compiles only the AutoTune service workflow when enabled (used by `nano_autotune`).
+- Use `PID VIEW` from the Service menu, or enable Serial debug output.
