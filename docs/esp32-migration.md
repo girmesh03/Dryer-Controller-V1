@@ -55,13 +55,23 @@ Relays are treated as **active-LOW** in firmware:
 - `SCL = 22`
 - LCD address remains `0x27` (as configured in `include/config_build.h`)
 
+#### LCD reliability note (ESP32 + PCF8574 backpacks)
+
+Some PCF8574 I2C LCD backpacks can show a “missing first character” glitch (e.g. `AULT HISTORY`) if the bus is too fast or cursor/clear commands don’t have enough settling time.
+
+If you still see missing characters:
+- Verify the LCD backpack is powered correctly (3.3V-safe I2C pull-ups; avoid 5V pull-ups into ESP32).
+- Verify SDA/SCL wiring is short and solid, with a common ground.
+
 ## EEPROM on ESP32
 
 ESP32 uses **flash-emulated EEPROM**. `EEPROMStore::init()` calls `EEPROM.begin(512)` and writes are finalized with `EEPROM.commit()` when changes are flushed.
 
 ## Watchdog / Reset Cause
 
-- Reset cause is obtained via `esp_reset_reason()` and mapped to the existing UI behavior (boot screen indicates watchdog resets).
+- Reset cause is obtained via `esp_reset_reason()` and mapped to the existing UI behavior:
+  - Boot screen can indicate `LAST RESET: WDT` or `LAST RESET: BROWNOUT`
+  - WDT/Brownout events are logged into EEPROM fault history as acknowledge-only faults
 - A Task Watchdog is initialized (2s nominal) and kicked from `loop()`.
 
 ## Why This Pin Set (Stability + Safety)

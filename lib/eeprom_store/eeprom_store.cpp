@@ -458,3 +458,77 @@ void EEPROMStore::requestSaveFOPDT(float k, float tau, float l) {
   pending_.fopdt_l = l;
   setFlag(FLAG_PENDING_FOPDT, true);
 }
+
+void EEPROMStore::logFault(uint8_t code, uint32_t timestamp_s, float temp_c) {
+  if (!isValid()) {
+    return;
+  }
+  if (code == 0u) {
+    return;
+  }
+
+  FaultEntry entry;
+  entry.code = code;
+  entry.timestamp_s = timestamp_s;
+  entry.temperature_c = temp_c;
+  for (uint8_t i = 0u; i < sizeof(entry.reserved); i++) {
+    entry.reserved[i] = 0u;
+  }
+
+  uint8_t head = EEPROM.read(static_cast<int>(ADDR_FAULT_HISTORY_HEAD));
+  if (head >= FAULT_HISTORY_COUNT) {
+    head = 0u;
+  }
+
+  const uint16_t base =
+      static_cast<uint16_t>(ADDR_FAULT_HISTORY + (static_cast<uint16_t>(head) * sizeof(FaultEntry)));
+  writeBytes(base, reinterpret_cast<const uint8_t*>(&entry), sizeof(FaultEntry));
+
+  head = static_cast<uint8_t>((head + 1u) % FAULT_HISTORY_COUNT);
+  eepromWrite8IfChanged(ADDR_FAULT_HISTORY_HEAD, head);
+
+  writeHeaderAndCRC();
+  eepromCommitIfNeeded();
+
+  // Fault logs are infrequent; treat as an immediate write for wear + rate limiting.
+  state_.last_write_ms = millis();
+}
+
+bool EEPROMStore::getFaultHistory(uint8_t index, FaultEntry& entry) const {
+  if (!isValid()) {
+    return false;
+  }
+  if (index >= FAULT_HISTORY_COUNT) {
+    return false;
+  }
+
+  uint8_t head = EEPROM.read(static_cast<int>(ADDR_FAULT_HISTORY_HEAD));
+  if (head >= FAULT_HISTORY_COUNT) {
+    head = 0u;
+  }
+
+  // Return most-recent-first ordering for UI convenience.
+  const uint8_t phys =
+      static_cast<uint8_t>((head + FAULT_HISTORY_COUNT - 1u - index) % FAULT_HISTORY_COUNT);
+
+  const uint16_t base =
+      static_cast<uint16_t>(ADDR_FAULT_HISTORY + (static_cast<uint16_t>(phys) * sizeof(FaultEntry)));
+  readBytes(base, reinterpret_cast<uint8_t*>(&entry), sizeof(FaultEntry));
+
+  return entry.code != 0u;
+}
+
+void EEPROMStore::clearFaultHistory() {
+  if (!isValid()) {
+    return;
+  }
+
+  for (uint16_t addr = 0u; addr < static_cast<uint16_t>(FAULT_HISTORY_COUNT * sizeof(FaultEntry)); addr++) {
+    eepromWrite8IfChanged(static_cast<uint16_t>(ADDR_FAULT_HISTORY + addr), 0x00u);
+  }
+  eepromWrite8IfChanged(ADDR_FAULT_HISTORY_HEAD, 0u);
+
+  writeHeaderAndCRC();
+  eepromCommitIfNeeded();
+  state_.last_write_ms = millis();
+}

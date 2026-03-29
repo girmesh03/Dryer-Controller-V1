@@ -5,14 +5,13 @@
 #include "app.h"
 #include "config_build.h"
 #include "ds18b20_sensor.h"
+#include "faults.h"
 #include "io_abstraction.h"
 
 extern IOAbstraction io;
 extern DS18B20Sensor tempSensor;
 extern AppStateMachine app;
-
-// Phase 10 will replace these placeholders with the real fault system.
-extern uint8_t g_has_fault;
+extern FaultManager faultMgr;
 
 // Set by service screens (Phase 5+).
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_HEATER_TEST
@@ -126,7 +125,7 @@ bool HeaterControl::canEnergizeHeater_() const {
   if (state_.enabled == 0u) {
     return false;
   }
-  if (g_has_fault != 0u) {
+  if (faultMgr.hasFault()) {
     return false;
   }
   if (!io.isDoorClosed()) {

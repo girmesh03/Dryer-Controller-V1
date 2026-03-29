@@ -45,7 +45,9 @@ void DS18B20Sensor::init() {
   state_.last_valid_temp = 0.0f;
   state_.last_valid_ms = now;
   state_.fault_counter = 0u;
-  state_.fault_code = 2u; // Start as disconnected until a valid reading is obtained.
+  // Start with "no fault" but invalid until we obtain at least one plausible sample.
+  // This avoids false positives during the first few seconds while the filter window fills.
+  state_.fault_code = 0u;
   state_.valid = 0u;
 
   for (uint8_t i = 0u; i < kWindowSize; i++) {
@@ -79,6 +81,10 @@ bool DS18B20Sensor::isPlausible_(float temp_c) const {
 
 bool DS18B20Sensor::checkRateOfChange_(float new_temp_c, uint32_t now_ms) const {
   if (!isValid()) {
+    return true;
+  }
+  if (state_.last_valid_temp == 0.0f) {
+    // No baseline yet (matches phase-3 spec behavior).
     return true;
   }
 
@@ -181,6 +187,25 @@ void DS18B20Sensor::update() {
         if (raw == DEVICE_DISCONNECTED_C) {
           // Library reports disconnected/CRC/read failure via sentinel.
           recordFault_(1u, now);
+          state_.state = State::IDLE;
+          continue;
+        }
+
+        // Before the median/EMA pipeline has enough samples, treat any plausible reading
+        // as "sensor present" to prevent spurious TEMP_SENSOR_FAULT at boot.
+        if (state_.sample_count < kWindowSize) {
+          if (!isPlausible_(raw)) {
+            recordFault_(3u, now);
+            state_.state = State::IDLE;
+            continue;
+          }
+
+          state_.filtered_temp = raw;
+          state_.ema_temp = raw;
+          state_.last_valid_ms = now;
+          state_.fault_counter = 0u;
+          state_.fault_code = 0u;
+          state_.valid = 1u;
           state_.state = State::IDLE;
           continue;
         }

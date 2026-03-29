@@ -22,6 +22,7 @@
 #include "pid_control.h"
 #include "eeprom_store.h"
 #include "io_abstraction.h"
+#include "faults.h"
 #include "ui_lcd.h"
 #include "keypad_input.h"
 #include "app.h"
@@ -35,11 +36,10 @@
 
 IOAbstraction io;
 EEPROMStore eepromStore;
+FaultManager faultMgr;
 
 bool g_was_watchdog_reset = false;
-
-// Phase 10 will replace this placeholder with the real fault system.
-uint8_t g_has_fault = 0u;
+uint8_t g_reset_cause_flags = 0u; // bit0=WDT, bit1=BROWNOUT
 
 // Phase 5 service-mode flag for HEATER TEST.
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_HEATER_TEST
@@ -124,13 +124,26 @@ namespace
 #if defined(__AVR__)
     const uint8_t flags = MCUSR;
     g_was_watchdog_reset = (flags & _BV(WDRF)) != 0;
+    g_reset_cause_flags = 0u;
+    if (flags & _BV(WDRF))
+      g_reset_cause_flags |= 0x01u;
+    if (flags & _BV(BORF))
+      g_reset_cause_flags |= 0x02u;
     MCUSR = 0;
     wdt_disable();
 #elif defined(ESP32)
     const esp_reset_reason_t reason = esp_reset_reason();
-    g_was_watchdog_reset = (reason == ESP_RST_TASK_WDT) || (reason == ESP_RST_INT_WDT) || (reason == ESP_RST_WDT);
+    g_reset_cause_flags = 0u;
+    const bool wdt = (reason == ESP_RST_TASK_WDT) || (reason == ESP_RST_INT_WDT) || (reason == ESP_RST_WDT);
+    const bool brownout = (reason == ESP_RST_BROWNOUT);
+    if (wdt)
+      g_reset_cause_flags |= 0x01u;
+    if (brownout)
+      g_reset_cause_flags |= 0x02u;
+    g_was_watchdog_reset = wdt;
 #else
     g_was_watchdog_reset = false;
+    g_reset_cause_flags = 0u;
 #endif
   }
 
@@ -187,6 +200,17 @@ void setup()
 #endif
 
   io.init();
+  faultMgr.init();
+
+  // Phase 10.9: log watchdog/brownout reset causes as acknowledge-only faults.
+  if ((g_reset_cause_flags & 0x01u) != 0u)
+  {
+    faultMgr.setFault(FaultCode::WATCHDOG_RESET);
+  }
+  else if ((g_reset_cause_flags & 0x02u) != 0u)
+  {
+    faultMgr.setFault(FaultCode::BROWNOUT);
+  }
 
   pidController.init();
   {
@@ -282,10 +306,21 @@ void loop()
     }
   }
 
-  // App state machine: 10 Hz (100ms)
+  // Fault manager + App state machine: 10 Hz (100ms)
   if (now - last_app_ms >= FAST_LOOP_PERIOD)
   {
     last_app_ms = now;
+
+    faultMgr.update();
+    if (faultMgr.hasFault())
+    {
+      io.emergencyStop();
+      if (app.getCurrentState() != SystemState::FAULT)
+      {
+        app.transitionTo(SystemState::FAULT);
+      }
+    }
+
     app.update();
   }
 

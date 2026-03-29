@@ -41,10 +41,6 @@ private:
     uint32_t state_entry_time_ms;
     SystemState previous_state;
 
-    // Minimal fault latch (Phase 10 introduces a full fault system).
-    // 0=none, otherwise latched until operator clears from FAULT screen.
-    uint8_t fault_code;
-
     uint8_t menu_selection;
 
     // Entry sequences from IDLE (e.g. **5 for Service, **8 for Settings).
@@ -88,6 +84,10 @@ private:
 #if ENABLE_SERVICE_MENU
     uint8_t service_menu_selection;
     uint8_t service_view;
+#if ENABLE_SERVICE_FAULT_HISTORY
+    uint8_t fault_history_index;
+    uint8_t fault_history_page; // 0=view, 1=confirm clear
+#endif
 #if ENABLE_SERVICE_DRUM_TEST
     uint8_t service_last_dir;
 #endif
@@ -119,10 +119,8 @@ private:
 
   void onEnter_(SystemState new_state);
   void onExit_(SystemState old_state);
-
-  void enterFault_(uint8_t fault_code);
-  bool canClearFault_() const;
   void renderFault_();
+  void renderFaultHistory_();
 
   void showInvalidKey_();
   void restoreScreen_();

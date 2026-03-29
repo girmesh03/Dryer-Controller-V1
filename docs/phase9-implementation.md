@@ -40,7 +40,7 @@ This document summarizes what was implemented in **Phase 9** and how it integrat
   - Sound enable/disable stored in EEPROM
   - Program editor entry
 - Program editor:
-  - List view shows 3 programs at a time (scrolls through all 6).
+  - List view shows the selected program with a `>` indicator and the next program for context (UP/DN changes selection, OK selects).
   - Edit view supports modifying:
     - **Name** (12 chars), **Temp setpoint**, **Duration**, **FWD/REV/STOP** pattern, **Duty limit**
   - Save requires confirmation prompt (Req 28).

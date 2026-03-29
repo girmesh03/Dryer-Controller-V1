@@ -269,15 +269,14 @@ float PIDControl::getLastOutput() const {
 
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
 #include "ds18b20_sensor.h"
+#include "faults.h"
 #include "heater_control.h"
 #include "io_abstraction.h"
 
 extern IOAbstraction io;
 extern DS18B20Sensor tempSensor;
 extern HeaterControl heaterControl;
-
-// Phase 10 will replace these placeholders with the real fault system.
-extern uint8_t g_has_fault;
+extern FaultManager faultMgr;
 
 void PIDControl::startAutoTune() {
   if (state_.autotune.active != 0u) {
@@ -293,7 +292,7 @@ void PIDControl::startAutoTune() {
     state_.autotune.abort_reason = AUTOTUNE_ABORT_SENSOR;
     return;
   }
-  if (g_has_fault != 0u) {
+  if (faultMgr.hasFault()) {
     state_.autotune.abort_reason = AUTOTUNE_ABORT_FAULT;
     return;
   }
@@ -434,7 +433,7 @@ void PIDControl::updateAutoTune(float input_c) {
     abortAutoTune();
     return;
   }
-  if (g_has_fault != 0u) {
+  if (faultMgr.hasFault()) {
     state_.autotune.abort_reason = AUTOTUNE_ABORT_FAULT;
     abortAutoTune();
     return;

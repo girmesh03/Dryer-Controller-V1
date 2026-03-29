@@ -29,7 +29,18 @@ public:
   static_assert(sizeof(Settings) == 20u, "EEPROM Settings must be 20 bytes");
   static_assert(sizeof(Program) == 40u, "EEPROM Program must be 40 bytes");
 
+  // Fault history entry (20 bytes, packed)
+  struct FaultEntry {
+    uint8_t code;          // FaultCode (Phase 10)
+    uint32_t timestamp_s;  // seconds since boot
+    float temperature_c;   // temperature at fault (°C)
+    uint8_t reserved[11];
+  } __attribute__((packed));
+
+  static_assert(sizeof(FaultEntry) == 20u, "EEPROM FaultEntry must be 20 bytes");
+
   static constexpr uint8_t PROGRAM_COUNT = 6u;
+  static constexpr uint8_t FAULT_HISTORY_COUNT = 10u;
 
   void init();
   void update(uint32_t now_ms); // Call at 1 Hz (slow loop)
@@ -62,6 +73,11 @@ public:
   // Factory reset of reserved EEPROM map
   void factoryReset();
 
+  // Fault history ring buffer (Phase 10)
+  void logFault(uint8_t code, uint32_t timestamp_s, float temp_c);
+  bool getFaultHistory(uint8_t index, FaultEntry& entry) const; // index 0 = most recent
+  void clearFaultHistory();
+
 private:
   static constexpr uint16_t EEPROM_USED_BYTES = 0x200; // 512 bytes reserved (Appendix D)
 
@@ -75,6 +91,7 @@ private:
   static constexpr uint16_t ADDR_FOPDT = 0x114; // 3 * float
   static constexpr uint16_t ADDR_FAULT_HISTORY = 0x120; // 200 bytes
   static constexpr uint16_t ADDR_FILTER_COUNTER = 0x1E8; // 4 bytes
+  static constexpr uint16_t ADDR_FAULT_HISTORY_HEAD = 0x1EC; // 1 byte (ring buffer head index)
 
   static constexpr uint16_t MAGIC_DR = 0x4452; // 'D''R'
   static constexpr uint8_t VERSION = 0x01;

@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include <Arduino.h>
+#include <pgmspace.h>
 
 #include "config_build.h"
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FACTORY_RESET
@@ -10,6 +11,7 @@
 #endif
 #include "ds18b20_sensor.h"
 #include "drum_control.h"
+#include "faults.h"
 #include "heater_control.h"
 #include "pid_control.h"
 #include "ui_lcd.h"
@@ -28,6 +30,7 @@ extern DS18B20Sensor tempSensor;
 extern DrumControl drumControl;
 extern HeaterControl heaterControl;
 extern PIDControl pidController;
+extern FaultManager faultMgr;
 
 #if ENABLE_SETTINGS_MENU
 extern EEPROMStore::Settings g_settings;
@@ -58,15 +61,6 @@ namespace
   constexpr uint32_t kIdleTempRefreshMs = 1000;
 
   constexpr uint32_t kEntrySeqTimeoutMs = 5000;
-
-  // Minimal fault codes (Phase 10 introduces a full fault system).
-  constexpr uint8_t kFaultNone = 0u;
-  constexpr uint8_t kFaultDoorOpen = 1u;
-  constexpr uint8_t kFaultTempSensor = 2u;
-  constexpr uint8_t kFaultOverTemp = 3u;
-
-  // Requirement 17.9: require temperature below 50°C before clearing thermal faults.
-  constexpr float kThermalFaultClearC = 50.0f;
 
   constexpr uint8_t kParamModeManual = 0u;
   constexpr uint8_t kParamModeAuto = 1u;
@@ -193,6 +187,10 @@ namespace
   constexpr uint32_t kAutoTuneUiRefreshMs = 1000;
 #endif
 
+#if ENABLE_SERVICE_FAULT_HISTORY
+  constexpr uint8_t kServiceViewFaultHistory = 8u;
+#endif
+
 #if ENABLE_SERVICE_FACTORY_RESET
   constexpr uint8_t kServiceViewFactoryReset = 7u;
 #endif
@@ -211,6 +209,9 @@ namespace
 #if ENABLE_SERVICE_IO_TEST
     IO_TEST,
 #endif
+#if ENABLE_SERVICE_FAULT_HISTORY
+    FAULT_HISTORY,
+#endif
 #if ENABLE_SERVICE_FOPDT_ID
     FOPDT_ID,
 #endif
@@ -227,8 +228,8 @@ namespace
   // expression so it works under C++11 without extra init code.
   constexpr uint8_t kServiceMenuItems =
       static_cast<uint8_t>(ENABLE_SERVICE_DRUM_TEST + ENABLE_SERVICE_HEATER_TEST + ENABLE_SERVICE_PID_VIEW +
-                           ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FOPDT_ID + ENABLE_SERVICE_AUTOTUNE +
-                           ENABLE_SERVICE_FACTORY_RESET);
+                           ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FAULT_HISTORY + ENABLE_SERVICE_FOPDT_ID +
+                           ENABLE_SERVICE_AUTOTUNE + ENABLE_SERVICE_FACTORY_RESET);
   static_assert(kServiceMenuItems > 0u, "Service menu enabled but no service tools enabled");
 
   ServiceItem serviceMenuItemByIndex_(uint8_t idx)
@@ -248,6 +249,10 @@ namespace
 #if ENABLE_SERVICE_IO_TEST
     if (idx-- == 0u)
       return ServiceItem::IO_TEST;
+#endif
+#if ENABLE_SERVICE_FAULT_HISTORY
+    if (idx-- == 0u)
+      return ServiceItem::FAULT_HISTORY;
 #endif
 #if ENABLE_SERVICE_FOPDT_ID
     if (idx-- == 0u)
@@ -272,6 +277,9 @@ namespace
 #elif ENABLE_SERVICE_IO_TEST
     return ServiceItem::IO_TEST;
 #else
+#if ENABLE_SERVICE_FAULT_HISTORY
+    return ServiceItem::FAULT_HISTORY;
+#else
 #if ENABLE_SERVICE_FOPDT_ID
     return ServiceItem::FOPDT_ID;
 #else
@@ -279,6 +287,7 @@ namespace
     return ServiceItem::AUTOTUNE;
 #else
     return ServiceItem::FACTORY_RESET;
+#endif
 #endif
 #endif
 #endif
@@ -416,8 +425,6 @@ void AppStateMachine::init()
   state_.previous_state = SystemState::BOOT;
   state_.state_entry_time_ms = millis();
 
-  state_.fault_code = kFaultNone;
-
   state_.menu_selection = 0;
 
   state_.entry_seq = 0u;
@@ -457,6 +464,10 @@ void AppStateMachine::init()
 #if ENABLE_SERVICE_MENU
   state_.service_menu_selection = 0u;
   state_.service_view = kServiceViewMenu;
+#if ENABLE_SERVICE_FAULT_HISTORY
+  state_.fault_history_index = 0u;
+  state_.fault_history_page = 0u;
+#endif
 #if ENABLE_SERVICE_DRUM_TEST
   state_.service_last_dir = 255u;
 #endif
@@ -498,13 +509,18 @@ bool AppStateMachine::canTransition_(SystemState from, SystemState to) const
     return false;
   }
 
+  // Safety: any state may transition to FAULT (Req 21.9).
+  if (to == SystemState::FAULT)
+  {
+    return true;
+  }
+
   switch (from)
   {
   case SystemState::BOOT:
     return (to == SystemState::IDLE) || (to == SystemState::FAULT);
   case SystemState::FAULT:
-    // Fault handling is fully implemented in Phase 10; for now allow returning
-    // to IDLE after the operator acknowledges.
+    // Latched fault: only allow returning to IDLE after operator acknowledgement.
     return (to == SystemState::IDLE);
   case SystemState::IDLE:
 #if ENABLE_SERVICE_MENU
@@ -572,41 +588,25 @@ void AppStateMachine::onEnter_(SystemState new_state)
     lcd.showBootScreen();
     break;
   case SystemState::FAULT:
-    // Minimal FAULT behavior (full fault manager + history comes in Phase 10).
     drumControl.stop();
     heaterControl.disable();
 
-    // If a fault was entered without a latched cause, derive a safe default.
-    if (state_.fault_code == kFaultNone)
-    {
-#if ENABLE_CYCLE_EXECUTION || (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE))
-      if (!io.isDoorClosed())
-      {
-        state_.fault_code = kFaultDoorOpen;
-      }
-      else
+#if ENABLE_CYCLE_EXECUTION || (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE || ENABLE_SERVICE_FACTORY_RESET))
+    // Safety redundancy: force outputs OFF on FAULT entry.
+    io.emergencyStop();
 #endif
-          if (!tempSensor.isValid())
-      {
-        state_.fault_code = kFaultTempSensor;
-      }
-      else if (tempSensor.getTemperature() >= static_cast<float>(OVER_TEMP_THRESHOLD))
-      {
-        state_.fault_code = kFaultOverTemp;
-      }
-    }
 
     renderFault_();
     break;
-	  case SystemState::IDLE:
-	    // Safety: IDLE must always be outputs-OFF.
-	    drumControl.stop();
-	    heaterControl.disable();
-	    lcd.showMainMenu(state_.menu_selection);
-	    state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
-	    lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
-	    state_.last_temp_display_ms = millis();
-	    break;
+  case SystemState::IDLE:
+    // Safety: IDLE must always be outputs-OFF.
+    drumControl.stop();
+    heaterControl.disable();
+    lcd.showMainMenu(state_.menu_selection);
+    state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
+    lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
+    state_.last_temp_display_ms = millis();
+    break;
 #if ENABLE_SETTINGS_MENU
   case SystemState::SETTINGS:
     state_.settings_view = kSettingsViewMenu;
@@ -628,54 +628,54 @@ void AppStateMachine::onEnter_(SystemState new_state)
     break;
 #endif
 #if ENABLE_CYCLE_EXECUTION
-	  case SystemState::START_DELAY:
-	    renderStartDelay_();
-	    break;
+  case SystemState::START_DELAY:
+    renderStartDelay_();
+    break;
 
-	  case SystemState::RUNNING_HEAT:
-	    // Phase 6: PID bumpless transfer occurs on RUNNING_HEAT entry.
-	    // Prepare PID and heater gating for a fresh cycle start.
-	    pidController.setOutputLimits(0.0f, 0.0f); // force output/integral to 0
-	    pidController.setOutputLimits(0.0f, static_cast<float>((state_.cycle_duty_limit > 100u) ? 100u
-	                                                                                           : state_.cycle_duty_limit));
-	    pidController.setSetpoint(static_cast<float>(state_.cycle_setpoint_c));
-	    pidController.reset();
+  case SystemState::RUNNING_HEAT:
+    // Phase 6: PID bumpless transfer occurs on RUNNING_HEAT entry.
+    // Prepare PID and heater gating for a fresh cycle start.
+    pidController.setOutputLimits(0.0f, 0.0f); // force output/integral to 0
+    pidController.setOutputLimits(0.0f, static_cast<float>((state_.cycle_duty_limit > 100u) ? 100u
+                                                                                            : state_.cycle_duty_limit));
+    pidController.setSetpoint(static_cast<float>(state_.cycle_setpoint_c));
+    pidController.reset();
 
-	    heaterControl.disable();
-	    heaterControl.setDutyCycle(0.0f);
-	    heaterControl.enable();
+    heaterControl.disable();
+    heaterControl.setDutyCycle(0.0f);
+    heaterControl.enable();
 
-	    // Drum pattern:
-	    //  - AUTO: from selected program
-	    //  - MANUAL: fixed Mixed_Load defaults (Req 12B)
-	    if (state_.param_mode == kParamModeAuto)
-	    {
-	      drumControl.setPattern(state_.auto_program.fwd_time_s, state_.auto_program.rev_time_s,
-	                             state_.auto_program.stop_time_s);
-	    }
-	    else
-	    {
-	      drumControl.setPattern(50u, 50u, 5u);
-	    }
-	    drumControl.start();
+    // Drum pattern:
+    //  - AUTO: from selected program
+    //  - MANUAL: fixed Mixed_Load defaults (Req 12B)
+    if (state_.param_mode == kParamModeAuto)
+    {
+      drumControl.setPattern(state_.auto_program.fwd_time_s, state_.auto_program.rev_time_s,
+                             state_.auto_program.stop_time_s);
+    }
+    else
+    {
+      drumControl.setPattern(50u, 50u, 5u);
+    }
+    drumControl.start();
 
-	    // Heating timer (minutes → ms).
-	    state_.cycle_end_ms =
-	        millis() + (static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul);
-	    state_.cycle_last_ui_ms = 0u;
-	    renderRunningHeat_();
-	    break;
+    // Heating timer (minutes → ms).
+    state_.cycle_end_ms =
+        millis() + (static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul);
+    state_.cycle_last_ui_ms = 0u;
+    renderRunningHeat_();
+    break;
 
-	  case SystemState::RUNNING_COOLDOWN:
-	    // Phase 11 extends this; keep safe behavior for now.
-	    heaterControl.disable();
-	    break;
+  case SystemState::RUNNING_COOLDOWN:
+    // Phase 11 extends this; keep safe behavior for now.
+    heaterControl.disable();
+    break;
 #else
-	  case SystemState::RUNNING_HEAT:
-	    // Cycle execution compiled out.
-	    pidController.reset();
-	    heaterControl.enable();
-	    break;
+  case SystemState::RUNNING_HEAT:
+    // Cycle execution compiled out.
+    pidController.reset();
+    heaterControl.enable();
+    break;
 #endif
   case SystemState::PROGRAM_SELECT:
     state_.auto_program_index = 0u;
@@ -685,62 +685,62 @@ void AppStateMachine::onEnter_(SystemState new_state)
     state_.auto_flags = 0u;
     renderProgramSelect_();
     break;
-	  case SystemState::PARAM_EDIT:
-	    if (state_.param_mode == kParamModeAuto)
-	    {
-	      state_.auto_flags &= static_cast<uint8_t>(~kAutoFlagEditing);
-	      renderAutoParamReview_();
-	    }
-	    else
-	    {
+  case SystemState::PARAM_EDIT:
+    if (state_.param_mode == kParamModeAuto)
+    {
+      state_.auto_flags &= static_cast<uint8_t>(~kAutoFlagEditing);
+      renderAutoParamReview_();
+    }
+    else
+    {
 #if ENABLE_CYCLE_EXECUTION
-	      // Req 12B: Manual mode starts at temperature input with defaults each entry.
-	      if (state_.previous_state == SystemState::IDLE)
-	      {
-	        state_.manual_temp_c = 60u;
-	        state_.manual_duration_min = 30u;
-	      }
-	      state_.manual_view = kManualViewTemp;
-	      renderManualTemp_();
+      // Req 12B: Manual mode starts at temperature input with defaults each entry.
+      if (state_.previous_state == SystemState::IDLE)
+      {
+        state_.manual_temp_c = 60u;
+        state_.manual_duration_min = 30u;
+      }
+      state_.manual_view = kManualViewTemp;
+      renderManualTemp_();
 #else
-	      lcd.clear();
-	      lcd.setCursor(0, 0);
-	      lcd.print(F("MANUAL MODE"));
-	      lcd.setCursor(0, 2);
-	      lcd.print(F("DISABLED"));
-	      lcd.setCursor(0, 3);
-	      lcd.print(F("B:BACK"));
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("MANUAL MODE"));
+      lcd.setCursor(0, 2);
+      lcd.print(F("DISABLED"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:BACK"));
 #endif
-	    }
-	    break;
-	  case SystemState::READY:
-	    if (state_.param_mode == kParamModeAuto)
-	    {
-	      // Should not be entered in current AUTO flow; keep a minimal safe screen.
-	      lcd.clear();
-	      lcd.setCursor(0, 0);
-	      lcd.print(F("READY"));
-	      lcd.setCursor(0, 3);
-	      lcd.print(F("B:BACK"));
-	    }
-	    else
-	    {
+    }
+    break;
+  case SystemState::READY:
+    if (state_.param_mode == kParamModeAuto)
+    {
+      // Should not be entered in current AUTO flow; keep a minimal safe screen.
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("READY"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:BACK"));
+    }
+    else
+    {
 #if ENABLE_CYCLE_EXECUTION
-	      renderManualConfirm_();
+      renderManualConfirm_();
 #else
-	      lcd.clear();
-	      lcd.setCursor(0, 0);
-	      lcd.print(F("MANUAL MODE"));
-	      lcd.setCursor(0, 2);
-	      lcd.print(F("DISABLED"));
-	      lcd.setCursor(0, 3);
-	      lcd.print(F("B:BACK"));
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print(F("MANUAL MODE"));
+      lcd.setCursor(0, 2);
+      lcd.print(F("DISABLED"));
+      lcd.setCursor(0, 3);
+      lcd.print(F("B:BACK"));
 #endif
-	    }
-	    break;
-	  default:
-	    break;
-	  }
+    }
+    break;
+  default:
+    break;
+  }
 }
 
 void AppStateMachine::onExit_(SystemState old_state)
@@ -798,82 +798,39 @@ void AppStateMachine::transitionTo(SystemState new_state)
   onEnter_(new_state);
 }
 
-void AppStateMachine::enterFault_(uint8_t fault_code)
-{
-  // Latch the first fault cause until operator clears it (Req 1.4 / Design: latched FAULT).
-  if (state_.fault_code == kFaultNone)
-  {
-    state_.fault_code = (fault_code == kFaultNone) ? kFaultNone : fault_code;
-  }
-
-  transitionTo(SystemState::FAULT);
-}
-
-bool AppStateMachine::canClearFault_() const
-{
-#if ENABLE_CYCLE_EXECUTION || (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE))
-  // Always require door closed before clearing any latched fault.
-  if (!io.isDoorClosed())
-  {
-    return false;
-  }
-#endif
-
-  switch (state_.fault_code)
-  {
-  case kFaultDoorOpen:
-    return true; // door closed already checked above
-  case kFaultTempSensor:
-    return tempSensor.isValid();
-  case kFaultOverTemp:
-    return tempSensor.isValid() && (tempSensor.getTemperature() < kThermalFaultClearC);
-  default:
-    // Conservative fallback.
-    return tempSensor.isValid();
-  }
-}
-
 void AppStateMachine::renderFault_()
 {
+  lcd.clear();
+
   lcd.setCursor(0, 0);
-  lcd.print(F("** FAULT **         "));
+  lcd.print(F("** FAULT **"));
+  lcdPadSpacesToEol_(lcd, 11u);
 
   lcd.setCursor(0, 1);
-  switch (state_.fault_code)
+  const __FlashStringHelper *msg = faultMgr.getFaultMessage();
+  lcd.print(msg);
+
+  // Pad the remainder of the line (Flash string length is unknown at compile time).
+  const char *p = reinterpret_cast<const char *>(msg);
+  uint8_t len = 0u;
+  while (len < 20u)
   {
-  case kFaultDoorOpen:
-    lcd.print(F("DOOR OPEN           "));
-    break;
-  case kFaultTempSensor:
-    lcd.print(F("TEMP SENSOR FAULT   "));
-    break;
-  case kFaultOverTemp:
-    lcd.print(F("OVER-TEMP FAULT     "));
-    break;
-  default:
-    lcd.print(F("CHECK SYSTEM        "));
-    break;
+    const char c = static_cast<char>(pgm_read_byte(p + len));
+    if (c == '\0')
+    {
+      break;
+    }
+    len++;
   }
+  lcdPadSpacesToEol_(lcd, len);
 
   lcd.setCursor(0, 2);
-  switch (state_.fault_code)
-  {
-  case kFaultDoorOpen:
-    lcd.print(F("CLOSE TO CONTINUE   "));
-    break;
-  case kFaultTempSensor:
-    lcd.print(F("FIX SENSOR WIRING   "));
-    break;
-  case kFaultOverTemp:
-    lcd.print(F("WAIT TO COOL        "));
-    break;
-  default:
-    lcd.print(F("RESOLVE CONDITION   "));
-    break;
-  }
+  lcd.print(F("CLOSE TO CONTINUE"));
+  lcdPadSpacesToEol_(lcd, 17u);
 
   lcd.setCursor(0, 3);
-  lcd.print(F("PRESS B TO CLEAR    "));
+  lcd.print(F("PRESS B TO CLEAR"));
+  lcdPadSpacesToEol_(lcd, 16u);
 }
 
 void AppStateMachine::restoreScreen_()
@@ -983,6 +940,7 @@ namespace
 
 void AppStateMachine::renderProgramSelect_()
 {
+  lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("AUTO MODE           "));
 
@@ -1252,25 +1210,12 @@ void AppStateMachine::updateRunningHeatUi_()
 {
   const uint32_t now = millis();
 
-  // Safety checks (basic; Phase 10 expands to full fault system).
+  // Fault detection is centralized in FaultManager (Phase 10).
   if (!tempSensor.isValid())
   {
-    enterFault_(kFaultTempSensor);
     return;
   }
-
   const float pv_c = tempSensor.getTemperature();
-  if (pv_c >= static_cast<float>(OVER_TEMP_THRESHOLD))
-  {
-    enterFault_(kFaultOverTemp);
-    return;
-  }
-
-  if (!io.isDoorClosed())
-  {
-    enterFault_(kFaultDoorOpen);
-    return;
-  }
 
   if (now >= state_.cycle_end_ms)
   {
@@ -1454,34 +1399,51 @@ void AppStateMachine::renderSettingsSound_()
 void AppStateMachine::renderProgramList_()
 {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(F("PROGRAM EDITOR"));
-  lcdPadSpacesToEol_(lcd, 14u);
+  // After lcd.clear() the cursor is already at (0,0).
+  lcd.print(F(" PROGRAM EDITOR      "));
 
-  uint8_t idx = state_.program_list_selection;
-  for (uint8_t row = 0u; row < 3u; row++)
+  const uint8_t sel =
+      (state_.program_list_selection >= EEPROMStore::PROGRAM_COUNT) ? 0u : state_.program_list_selection;
+  state_.program_list_selection = sel;
+
+  // List UI matches operator menus: show selection arrow + next item + hints.
+  EEPROMStore::Program p_sel;
+  (void)eepromStore.loadProgram(sel, p_sel);
+
+  const uint8_t next = static_cast<uint8_t>((sel + 1u) % EEPROMStore::PROGRAM_COUNT);
+  EEPROMStore::Program p_next;
+  (void)eepromStore.loadProgram(next, p_next);
+
+  // Line 2: selected program
+  lcd.setCursor(0, 1);
+  lcd.print(F(" > "));
+  lcd.print(p_sel.name);
+  uint8_t used = 3u;
+  for (uint8_t i = 0u; i < 12u; i++)
   {
-    EEPROMStore::Program p;
-    (void)eepromStore.loadProgram(idx, p);
-
-    lcd.setCursor(0, static_cast<uint8_t>(row + 1u));
-    lcd.print((row == 0u) ? F("> ") : F("  "));
-    lcd.print(static_cast<char>('1' + idx));
-    lcd.print(F(". "));
-    lcd.print(p.name);
-
-    // Pad remainder of the line.
-    uint8_t used = 4u; // "> X. "
-    for (uint8_t i = 0u; i < 12u; i++)
-    {
-      if (p.name[i] == '\0')
-        break;
-      used++;
-    }
-    lcdPadSpacesToEol_(lcd, used);
-
-    idx = static_cast<uint8_t>((idx + 1u) % EEPROMStore::PROGRAM_COUNT);
+    if (p_sel.name[i] == '\0')
+      break;
+    used++;
   }
+  lcdPadSpacesToEol_(lcd, used);
+
+  // Line 3: next program (context)
+  lcd.setCursor(0, 2);
+  lcd.print(F("   "));
+  lcd.print(p_next.name);
+  used = 3u;
+  for (uint8_t i = 0u; i < 12u; i++)
+  {
+    if (p_next.name[i] == '\0')
+      break;
+    used++;
+  }
+  lcdPadSpacesToEol_(lcd, used);
+
+  // Line 4: hints
+  lcd.setCursor(0, 3);
+  lcd.print(F("UP/DN OK:SELECT"));
+  lcdPadSpacesToEol_(lcd, 14u);
 }
 
 void AppStateMachine::renderProgramEdit_()
@@ -1698,6 +1660,11 @@ void AppStateMachine::renderService_()
     lcd.print(F("B:BACK"));
     break;
 #endif
+#if ENABLE_SERVICE_FAULT_HISTORY
+  case kServiceViewFaultHistory:
+    renderFaultHistory_();
+    break;
+#endif
 #if ENABLE_SERVICE_FOPDT_ID
   case kServiceViewFopdt:
     renderFopdt_();
@@ -1785,6 +1752,11 @@ void AppStateMachine::renderServiceMenu_()
       lcd.print(F("I/O TEST          "));
       break;
 #endif
+#if ENABLE_SERVICE_FAULT_HISTORY
+    case ServiceItem::FAULT_HISTORY:
+      lcd.print(F("FAULT HISTORY     "));
+      break;
+#endif
 #if ENABLE_SERVICE_FOPDT_ID
     case ServiceItem::FOPDT_ID:
       lcd.print(F("FOPDT ID          "));
@@ -1806,6 +1778,212 @@ void AppStateMachine::renderServiceMenu_()
     }
   }
 }
+
+#if ENABLE_SERVICE_FAULT_HISTORY
+namespace
+{
+  const char FAULT_HIST_DOOR[] PROGMEM = "DOOR OPEN";
+  const char FAULT_HIST_TEMP[] PROGMEM = "TEMP SENSOR";
+  const char FAULT_HIST_OVERT[] PROGMEM = "OVER-TEMP";
+  const char FAULT_HIST_RUNAWAY[] PROGMEM = "THERM RUNAWAY";
+  const char FAULT_HIST_TIMEOUT[] PROGMEM = "HEAT TIMEOUT";
+  const char FAULT_HIST_OUTPUT[] PROGMEM = "OUTPUT FAULT";
+  const char FAULT_HIST_WDT[] PROGMEM = "WDT RESET";
+  const char FAULT_HIST_BROWNOUT[] PROGMEM = "BROWNOUT";
+  const char FAULT_HIST_SELFTEST[] PROGMEM = "SELF-TEST";
+  const char FAULT_HIST_UNKNOWN[] PROGMEM = "UNKNOWN";
+
+  const __FlashStringHelper *faultHistoryLabel_(uint8_t code)
+  {
+    switch (static_cast<FaultCode>(code))
+    {
+    case FaultCode::DOOR_OPEN:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_DOOR);
+    case FaultCode::TEMP_SENSOR_FAULT:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_TEMP);
+    case FaultCode::OVER_TEMP:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_OVERT);
+    case FaultCode::THERMAL_RUNAWAY:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_RUNAWAY);
+    case FaultCode::HEATING_TIMEOUT:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_TIMEOUT);
+    case FaultCode::OUTPUT_FAULT:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_OUTPUT);
+    case FaultCode::WATCHDOG_RESET:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_WDT);
+    case FaultCode::BROWNOUT:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_BROWNOUT);
+    case FaultCode::SELF_TEST_FAIL:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_SELFTEST);
+    case FaultCode::NONE:
+    default:
+      return reinterpret_cast<const __FlashStringHelper *>(FAULT_HIST_UNKNOWN);
+    }
+  }
+
+  uint8_t u16Digits_(uint16_t value)
+  {
+    if (value >= 100u)
+      return 3u;
+    if (value >= 10u)
+      return 2u;
+    return 1u;
+  }
+} // namespace
+
+void AppStateMachine::renderFaultHistory_()
+{
+  if (state_.fault_history_page != 0u)
+  {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("CLEAR HISTORY?"));
+    lcdPadSpacesToEol_(lcd, 14u);
+    lcd.setCursor(0, 1);
+    lcd.print(F("A:YES  B:NO"));
+    lcdPadSpacesToEol_(lcd, 11u);
+    lcd.setCursor(0, 2);
+    lcd.print(F("                "));
+    lcd.setCursor(0, 3);
+    lcd.print(F("                "));
+    return;
+  }
+
+  uint8_t count = 0u;
+  EEPROMStore::FaultEntry tmp;
+  for (uint8_t i = 0u; i < EEPROMStore::FAULT_HISTORY_COUNT; i++)
+  {
+    if (!eepromStore.getFaultHistory(i, tmp))
+    {
+      break;
+    }
+    count++;
+  }
+
+  lcd.clear();
+  // After lcd.clear() the cursor is already at (0,0).
+  lcd.print(F(" FAULT HISTORY       "));
+
+  if (count == 0u)
+  {
+    lcd.setCursor(0, 1);
+    lcd.print(F("NO FAULTS LOGGED"));
+    lcdPadSpacesToEol_(lcd, 16u);
+    lcd.setCursor(0, 2);
+    lcd.print(F("                "));
+    lcd.setCursor(0, 3);
+    lcd.print(F("B:BACK"));
+    lcdPadSpacesToEol_(lcd, 6u);
+    return;
+  }
+
+  if (state_.fault_history_index >= count)
+  {
+    state_.fault_history_index = static_cast<uint8_t>(count - 1u);
+  }
+
+  EEPROMStore::FaultEntry entry;
+  (void)eepromStore.getFaultHistory(state_.fault_history_index, entry);
+
+  // Line 2: index/total + short fault label.
+  {
+    const uint8_t pos = static_cast<uint8_t>(state_.fault_history_index + 1u);
+    const uint8_t pos_digits = (pos >= 10u) ? 2u : 1u;
+    const uint8_t cnt_digits = (count >= 10u) ? 2u : 1u;
+    uint8_t cols = static_cast<uint8_t>(pos_digits + 1u + cnt_digits + 1u); // "p/c "
+
+    lcd.setCursor(0, 1);
+    lcdPrintU16_NoLeading_(lcd, pos);
+    lcd.print('/');
+    lcdPrintU16_NoLeading_(lcd, count);
+    lcd.print(' ');
+
+    const __FlashStringHelper *label = faultHistoryLabel_(entry.code);
+    lcd.print(label);
+
+    // Pad the remainder of the line (Flash string length is unknown at compile time).
+    const char *p = reinterpret_cast<const char *>(label);
+    const uint8_t max_len = (cols < 20u) ? static_cast<uint8_t>(20u - cols) : 0u;
+    uint8_t len = 0u;
+    while (len < max_len)
+    {
+      const char c = static_cast<char>(pgm_read_byte(p + len));
+      if (c == '\0')
+      {
+        break;
+      }
+      len++;
+    }
+    cols = static_cast<uint8_t>(cols + len);
+    lcdPadSpacesToEol_(lcd, cols);
+  }
+
+  // Line 3: temperature + timestamp.
+  {
+    char unit_char = 'C';
+    int16_t temp_deci = static_cast<int16_t>(entry.temperature_c * 10.0f +
+                                             ((entry.temperature_c >= 0.0f) ? 0.5f : -0.5f));
+
+#if ENABLE_SETTINGS_MENU
+    if (getTempUnit_() == kTempUnitF)
+    {
+      const int32_t d = static_cast<int32_t>(temp_deci);
+      const int32_t deci_f = (d * 9 + ((d >= 0) ? 2 : -2)) / 5 + 320; // °F * 10
+      temp_deci = static_cast<int16_t>(deci_f);
+      unit_char = 'F';
+    }
+#endif
+
+    bool neg = (temp_deci < 0);
+    uint16_t abs_val = static_cast<uint16_t>(neg ? -temp_deci : temp_deci);
+    const uint16_t whole = static_cast<uint16_t>(abs_val / 10u);
+    const uint8_t frac = static_cast<uint8_t>(abs_val % 10u);
+
+    uint8_t cols = 0u;
+    lcd.setCursor(0, 2);
+    lcd.print(F("T:"));
+    cols = 2u;
+    if (neg)
+    {
+      lcd.print('-');
+      cols++;
+    }
+    lcdPrintU16_NoLeading_(lcd, whole);
+    cols = static_cast<uint8_t>(cols + u16Digits_(whole));
+    lcd.print('.');
+    lcd.print(static_cast<char>('0' + (frac % 10u)));
+    cols = static_cast<uint8_t>(cols + 2u);
+    lcd.print(unit_char);
+    cols++;
+    lcd.print(' ');
+    cols++;
+
+    uint32_t t = entry.timestamp_s;
+    uint16_t hh = static_cast<uint16_t>(t / 3600u);
+    if (hh > 99u)
+      hh = 99u;
+    const uint8_t mm = static_cast<uint8_t>((t / 60u) % 60u);
+    const uint8_t ss = static_cast<uint8_t>(t % 60u);
+    lcdPrintU8_2_(lcd, static_cast<uint8_t>(hh));
+    cols = static_cast<uint8_t>(cols + 2u);
+    lcd.print(':');
+    cols++;
+    lcdPrintU8_2_(lcd, mm);
+    cols = static_cast<uint8_t>(cols + 2u);
+    lcd.print(':');
+    cols++;
+    lcdPrintU8_2_(lcd, ss);
+    cols = static_cast<uint8_t>(cols + 2u);
+
+    lcdPadSpacesToEol_(lcd, cols);
+  }
+
+  // Line 4: hints.
+  lcd.setCursor(0, 3);
+  lcd.print(F("UP/DN C:CLEAR B:BACK"));
+  lcdPadSpacesToEol_(lcd, 19u);
+}
+#endif // ENABLE_SERVICE_FAULT_HISTORY
 
 #if ENABLE_SERVICE_DRUM_TEST
 void AppStateMachine::updateDrumTestDirection_()
@@ -2411,7 +2589,8 @@ void AppStateMachine::updateAutoTuneUi_()
     const uint8_t reason = pidController.getAutoTuneAbortReason();
     if (reason == 1u)
     { // door open -> FAULT (Req 6)
-      enterFault_(kFaultDoorOpen);
+      faultMgr.setFault(FaultCode::DOOR_OPEN);
+      transitionTo(SystemState::FAULT);
       return;
     }
 
@@ -2454,16 +2633,6 @@ void AppStateMachine::update()
 #if ENABLE_CYCLE_EXECUTION
   if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::START_DELAY)
   {
-    if (!io.isDoorClosed())
-    {
-      enterFault_(kFaultDoorOpen);
-      return;
-    }
-    if (!tempSensor.isValid())
-    {
-      enterFault_(kFaultTempSensor);
-      return;
-    }
     if (now - state_.state_entry_time_ms >= kStartDelayMs)
     {
       transitionTo(SystemState::RUNNING_HEAT);
@@ -2559,6 +2728,14 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
       if (state_.service_view != kServiceViewMenu)
       {
         // STOP acts as "back" inside service tools (and stops the drum test).
+#if ENABLE_SERVICE_FAULT_HISTORY
+        if (state_.service_view == kServiceViewFaultHistory && state_.fault_history_page != 0u)
+        {
+          state_.fault_history_page = 0u;
+          renderService_();
+          return;
+        }
+#endif
 #if ENABLE_SERVICE_DRUM_TEST
         if (state_.service_view == kServiceViewDrumTest)
         {
@@ -2643,34 +2820,18 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
     if (state_.current_state == SystemState::FAULT)
     {
       // Fault clearing requires operator acknowledgment AND cleared conditions.
-      if (canClearFault_())
+      if (faultMgr.canClearFault())
       {
-        state_.fault_code = kFaultNone;
+        faultMgr.clearFault();
         transitionTo(SystemState::IDLE);
         return;
       }
 
       // Briefly show why it can't be cleared, then re-render FAULT screen.
       state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
-      lcd.setCursor(0, 3);
-#if ENABLE_CYCLE_EXECUTION || (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE))
-      if (!io.isDoorClosed())
-      {
-        lcd.print(F("CLOSE DOOR          "));
-        return;
-      }
-#endif
-      if (!tempSensor.isValid())
-      {
-        lcd.print(F("CHECK SENSOR        "));
-        return;
-      }
-      if (state_.fault_code == kFaultOverTemp && tempSensor.getTemperature() >= kThermalFaultClearC)
-      {
-        lcd.print(F("WAIT TO COOL        "));
-        return;
-      }
-      lcd.print(F("NOT CLEARED         "));
+      lcd.setCursor(0, 2);
+      lcd.print(F("CONDITIONS NOT OK"));
+      lcdPadSpacesToEol_(lcd, 17u);
       return;
     }
 
@@ -2680,47 +2841,47 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
       return;
     }
 
-	    if (state_.current_state == SystemState::PARAM_EDIT && state_.param_mode == kParamModeAuto)
-	    {
-	      if ((state_.auto_flags & kAutoFlagEditing) != 0u)
-	      {
-	        // Discard edits and return to review.
-	        state_.auto_temp_c = state_.auto_program.temp_setpoint;
-	        state_.auto_duration_min = state_.auto_program.duration_min;
-	        state_.auto_flags = 0u;
-	        renderAutoParamReview_();
-	        return;
-	      }
+    if (state_.current_state == SystemState::PARAM_EDIT && state_.param_mode == kParamModeAuto)
+    {
+      if ((state_.auto_flags & kAutoFlagEditing) != 0u)
+      {
+        // Discard edits and return to review.
+        state_.auto_temp_c = state_.auto_program.temp_setpoint;
+        state_.auto_duration_min = state_.auto_program.duration_min;
+        state_.auto_flags = 0u;
+        renderAutoParamReview_();
+        return;
+      }
 
-	      transitionTo(SystemState::PROGRAM_SELECT);
-	      return;
-	    }
+      transitionTo(SystemState::PROGRAM_SELECT);
+      return;
+    }
 
 #if ENABLE_CYCLE_EXECUTION
-	    if (state_.current_state == SystemState::PARAM_EDIT && state_.param_mode == kParamModeManual)
-	    {
-	      if (state_.manual_view == kManualViewDuration)
-	      {
-	        // Manual duration screen: STOP returns to temp screen (Req 12B.30).
-	        state_.manual_view = kManualViewTemp;
-	        renderManualTemp_();
-	        return;
-	      }
-	    }
+    if (state_.current_state == SystemState::PARAM_EDIT && state_.param_mode == kParamModeManual)
+    {
+      if (state_.manual_view == kManualViewDuration)
+      {
+        // Manual duration screen: STOP returns to temp screen (Req 12B.30).
+        state_.manual_view = kManualViewTemp;
+        renderManualTemp_();
+        return;
+      }
+    }
 
-	    if (state_.current_state == SystemState::START_DELAY || state_.current_state == SystemState::RUNNING_HEAT ||
-	        state_.current_state == SystemState::RUNNING_COOLDOWN)
-	    {
-	      transitionTo(SystemState::IDLE);
-	      return;
-	    }
+    if (state_.current_state == SystemState::START_DELAY || state_.current_state == SystemState::RUNNING_HEAT ||
+        state_.current_state == SystemState::RUNNING_COOLDOWN)
+    {
+      transitionTo(SystemState::IDLE);
+      return;
+    }
 #endif
 
-	    if (state_.current_state == SystemState::PROGRAM_SELECT || state_.current_state == SystemState::PARAM_EDIT)
-	    {
-	      transitionTo(SystemState::IDLE);
-	      return;
-	    }
+    if (state_.current_state == SystemState::PROGRAM_SELECT || state_.current_state == SystemState::PARAM_EDIT)
+    {
+      transitionTo(SystemState::IDLE);
+      return;
+    }
 
     // In IDLE, STOP has no action.
     return;
@@ -2853,102 +3014,102 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
     return;
   }
 
-	  case SystemState::PARAM_EDIT:
-	  {
-	    if (state_.param_mode != kParamModeAuto)
-	    {
+  case SystemState::PARAM_EDIT:
+  {
+    if (state_.param_mode != kParamModeAuto)
+    {
 #if ENABLE_CYCLE_EXECUTION
-	      // Manual mode parameter entry (Req 12B).
-	      if (state_.manual_view == kManualViewTemp)
-	      {
-	        if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
-	        {
-	          const bool inc = (key == KeypadInput::Key::UP);
-	          uint8_t t_c = state_.manual_temp_c;
+      // Manual mode parameter entry (Req 12B).
+      if (state_.manual_view == kManualViewTemp)
+      {
+        if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
+        {
+          const bool inc = (key == KeypadInput::Key::UP);
+          uint8_t t_c = state_.manual_temp_c;
 #if ENABLE_SETTINGS_MENU
-	          if (getTempUnit_() == kTempUnitF)
-	          {
-	            const uint8_t min_f = cToF_u8(MIN_TEMP);
-	            const uint8_t max_f = cToF_u8(MAX_TEMP);
-	            uint8_t t_f = cToF_u8(t_c);
-	            t_f = wrapStepU8(t_f, 5u, min_f, max_f, inc);
-	            t_c = fToC_u8(t_f);
-	            if (t_c < MIN_TEMP)
-	              t_c = MIN_TEMP;
-	            if (t_c > MAX_TEMP)
-	              t_c = MAX_TEMP;
-	          }
-	          else
+          if (getTempUnit_() == kTempUnitF)
+          {
+            const uint8_t min_f = cToF_u8(MIN_TEMP);
+            const uint8_t max_f = cToF_u8(MAX_TEMP);
+            uint8_t t_f = cToF_u8(t_c);
+            t_f = wrapStepU8(t_f, 5u, min_f, max_f, inc);
+            t_c = fToC_u8(t_f);
+            if (t_c < MIN_TEMP)
+              t_c = MIN_TEMP;
+            if (t_c > MAX_TEMP)
+              t_c = MAX_TEMP;
+          }
+          else
 #endif
-	          {
-	            t_c = wrapStepU8(t_c, 5u, MIN_TEMP, MAX_TEMP, inc);
-	          }
-	          state_.manual_temp_c = t_c;
-	          renderManualTemp_();
-	          return;
-	        }
-	        if (key == KeypadInput::Key::OK)
-	        {
-	          state_.manual_view = kManualViewDuration;
-	          renderManualDuration_();
-	          return;
-	        }
+          {
+            t_c = wrapStepU8(t_c, 5u, MIN_TEMP, MAX_TEMP, inc);
+          }
+          state_.manual_temp_c = t_c;
+          renderManualTemp_();
+          return;
+        }
+        if (key == KeypadInput::Key::OK)
+        {
+          state_.manual_view = kManualViewDuration;
+          renderManualDuration_();
+          return;
+        }
 
-	        showInvalidKey_();
-	        return;
-	      }
+        showInvalidKey_();
+        return;
+      }
 
-	      // Duration input view.
-	      if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
-	      {
-	        const bool inc = (key == KeypadInput::Key::UP);
-	        uint8_t m = state_.manual_duration_min;
-	        m = wrapStepU8(m, 5u, 10u, 120u, inc);
-	        state_.manual_duration_min = m;
-	        renderManualDuration_();
-	        return;
-	      }
-	      if (key == KeypadInput::Key::OK)
-	      {
-	        transitionTo(SystemState::READY);
-	        return;
-	      }
+      // Duration input view.
+      if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
+      {
+        const bool inc = (key == KeypadInput::Key::UP);
+        uint8_t m = state_.manual_duration_min;
+        m = wrapStepU8(m, 5u, 10u, 120u, inc);
+        state_.manual_duration_min = m;
+        renderManualDuration_();
+        return;
+      }
+      if (key == KeypadInput::Key::OK)
+      {
+        transitionTo(SystemState::READY);
+        return;
+      }
 
-	      showInvalidKey_();
-	      return;
+      showInvalidKey_();
+      return;
 #else
-	      showInvalidKey_();
-	      return;
+      showInvalidKey_();
+      return;
 #endif
-	    }
+    }
 
-	    const bool editing = (state_.auto_flags & kAutoFlagEditing) != 0u;
+    const bool editing = (state_.auto_flags & kAutoFlagEditing) != 0u;
 
-	    if (!editing)
-	    {
-	      if (key == KeypadInput::Key::START)
-	      {
+    if (!editing)
+    {
+      if (key == KeypadInput::Key::START)
+      {
 #if ENABLE_CYCLE_EXECUTION
-	        state_.cycle_setpoint_c = state_.auto_temp_c;
-	        state_.cycle_duration_min = state_.auto_duration_min;
-	        state_.cycle_duty_limit = state_.auto_program.duty_limit;
-	        transitionTo(SystemState::START_DELAY);
+        state_.cycle_setpoint_c = state_.auto_temp_c;
+        state_.cycle_duration_min = state_.auto_duration_min;
+        state_.cycle_duty_limit = state_.auto_program.duty_limit;
+        transitionTo(SystemState::START_DELAY);
 #else
-	        showInvalidKey_();
+        showInvalidKey_();
 #endif
-	        return;
-	      }
-	      if (key == KeypadInput::Key::KEY_STAR)
-	      {
-	        state_.auto_flags |= kAutoFlagEditing; // start editing on TEMP
-	        state_.auto_flags &= static_cast<uint8_t>(~kAutoFlagFieldTime);
-	        renderAutoParamEdit_();
-	        return;
-	      }
+        return;
+      }
+      if (key == KeypadInput::Key::KEY_STAR)
+      {
+        state_.auto_flags |= kAutoFlagEditing; // start editing on TEMP
+        state_.auto_flags &= static_cast<uint8_t>(~kAutoFlagFieldTime);
+        renderAutoParamEdit_();
+        return;
+      }
 
-	      showInvalidKey_();
-	      return;
-	    }
+      showInvalidKey_();
+      return;
+    }
 
     if (key == KeypadInput::Key::LEFT || key == KeypadInput::Key::RIGHT)
     {
@@ -3036,43 +3197,43 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
       return;
     }
 
-	    showInvalidKey_();
-	    return;
-	  }
+    showInvalidKey_();
+    return;
+  }
 
 #if ENABLE_CYCLE_EXECUTION
-	  case SystemState::READY:
-	  {
-	    if (state_.param_mode != kParamModeManual)
-	    {
-	      showInvalidKey_();
-	      return;
-	    }
+  case SystemState::READY:
+  {
+    if (state_.param_mode != kParamModeManual)
+    {
+      showInvalidKey_();
+      return;
+    }
 
-	    if (key == KeypadInput::Key::START)
-	    {
-	      state_.cycle_setpoint_c = state_.manual_temp_c;
-	      state_.cycle_duration_min = state_.manual_duration_min;
-	      state_.cycle_duty_limit = 100u;
-	      transitionTo(SystemState::START_DELAY);
-	      return;
-	    }
-	    if (key == KeypadInput::Key::KEY_STAR)
-	    {
-	      state_.manual_view = kManualViewTemp;
-	      transitionTo(SystemState::PARAM_EDIT);
-	      return;
-	    }
+    if (key == KeypadInput::Key::START)
+    {
+      state_.cycle_setpoint_c = state_.manual_temp_c;
+      state_.cycle_duration_min = state_.manual_duration_min;
+      state_.cycle_duty_limit = 100u;
+      transitionTo(SystemState::START_DELAY);
+      return;
+    }
+    if (key == KeypadInput::Key::KEY_STAR)
+    {
+      state_.manual_view = kManualViewTemp;
+      transitionTo(SystemState::PARAM_EDIT);
+      return;
+    }
 
-	    showInvalidKey_();
-	    return;
-	  }
+    showInvalidKey_();
+    return;
+  }
 #endif
 
 #if ENABLE_SETTINGS_MENU
-	  case SystemState::SETTINGS:
-	  {
-	    // Views are handled inside SETTINGS without introducing more global states.
+  case SystemState::SETTINGS:
+  {
+    // Views are handled inside SETTINGS without introducing more global states.
     if (state_.settings_view == kSettingsViewMenu)
     {
       const uint8_t max_sel =
@@ -3390,6 +3551,73 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
     }
 #endif
 
+#if ENABLE_SERVICE_FAULT_HISTORY
+    if (state_.service_view == kServiceViewFaultHistory)
+    {
+      if (state_.fault_history_page == 0u)
+      {
+        // Scroll entries (0 = most recent).
+        if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
+        {
+          uint8_t count = 0u;
+          EEPROMStore::FaultEntry tmp;
+          for (uint8_t i = 0u; i < EEPROMStore::FAULT_HISTORY_COUNT; i++)
+          {
+            if (!eepromStore.getFaultHistory(i, tmp))
+            {
+              break;
+            }
+            count++;
+          }
+
+          if (count != 0u)
+          {
+            uint8_t idx = state_.fault_history_index;
+            if (key == KeypadInput::Key::UP)
+            {
+              idx = (idx == 0u) ? static_cast<uint8_t>(count - 1u) : static_cast<uint8_t>(idx - 1u);
+            }
+            else
+            {
+              idx = static_cast<uint8_t>((idx + 1u) % count);
+            }
+            state_.fault_history_index = idx;
+            renderFaultHistory_();
+          }
+          return;
+        }
+
+        if (key == KeypadInput::Key::KEY_C)
+        {
+          // Confirmation prompt (Req 18.6).
+          state_.fault_history_page = 1u;
+          renderFaultHistory_();
+          return;
+        }
+
+        showInvalidKey_();
+        return;
+      }
+
+      // Page: confirm clear.
+      if (key == KeypadInput::Key::START)
+      {
+        eepromStore.clearFaultHistory();
+        state_.fault_history_page = 0u;
+        state_.fault_history_index = 0u;
+        renderFaultHistory_();
+        state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+        lcd.setCursor(0, 3);
+        lcd.print(F("HISTORY CLEARED"));
+        lcdPadSpacesToEol_(lcd, 15u);
+        return;
+      }
+
+      showInvalidKey_();
+      return;
+    }
+#endif
+
 #if ENABLE_SERVICE_FOPDT_ID
     if (state_.service_view == kServiceViewFopdt)
     {
@@ -3551,11 +3779,13 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
 #elif defined(__AVR__)
         // Hold here and let watchdog reset the MCU (Req 30).
         wdt_enable(WDTO_2S);
-        while (true) {
+        while (true)
+        {
           // intentional: no wdt_reset()
         }
 #else
-        while (true) {
+        while (true)
+        {
           // Fallback: stop execution.
         }
 #endif
@@ -3621,6 +3851,14 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
 #if ENABLE_SERVICE_IO_TEST
       case ServiceItem::IO_TEST:
         state_.service_view = kServiceViewIoTest;
+        renderService_();
+        return;
+#endif
+#if ENABLE_SERVICE_FAULT_HISTORY
+      case ServiceItem::FAULT_HISTORY:
+        state_.fault_history_index = 0u;
+        state_.fault_history_page = 0u;
+        state_.service_view = kServiceViewFaultHistory;
         renderService_();
         return;
 #endif
