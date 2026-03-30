@@ -230,8 +230,9 @@ void EEPROMStore::init() {
 
 #if defined(ESP32)
   // ESP32 EEPROM is flash-emulated and must be initialized with a size.
-  // Keep the same reserved map size for compatibility with existing layouts.
-  if (!EEPROM.begin(EEPROM_USED_BYTES)) {
+  // Initialize the full 1 KB region (matches AVR EEPROM capacity / design.md).
+  // The CRC-protected reserved map currently uses the first 512 bytes (Appendix D).
+  if (!EEPROM.begin(EEPROM_TOTAL_BYTES)) {
     // If initialization fails, keep FLAG_VALID cleared; callers will fall back.
     return;
   }

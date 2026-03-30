@@ -35,6 +35,11 @@ public:
   void transitionTo(SystemState new_state);
   void handleKeyPress(KeypadInput::Key key);
 
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_IO_TEST
+  bool isIoTestActive() const;
+  void getIoTestOutputs(bool& heater_on, bool& motor_fwd_on, bool& motor_rev_on, bool& aux_on) const;
+#endif
+
 private:
   struct {
     SystemState current_state;
@@ -65,8 +70,41 @@ private:
     uint8_t cycle_setpoint_c;
     uint8_t cycle_duration_min;
     uint8_t cycle_duty_limit;
-    uint32_t cycle_end_ms;
     uint32_t cycle_last_ui_ms;
+
+    // Original parameters at cycle start (for in-cycle edit limits + asterisk indicator).
+    uint8_t cycle_orig_setpoint_c;
+    uint8_t cycle_orig_duration_min;
+
+    // Heating phase timing (pause-aware).
+    uint32_t heat_start_ms;
+    uint32_t heat_pause_total_ms;
+
+    // Cooldown phase timing (pause-aware).
+    uint32_t cooldown_start_ms;
+    uint32_t cooldown_pause_total_ms;
+
+    // Pause/resume state.
+    uint32_t pause_start_ms;
+    SystemState paused_from_state;
+    uint32_t pause_timeout_msg_start_ms;
+    uint8_t pause_timeout_shown : 1;
+
+    // In-cycle parameter modification (Req 13).
+    uint8_t cycle_edit_active : 1;
+    uint8_t cycle_edit_field : 1; // 0=temp, 1=time
+    uint8_t cycle_temp_modified : 1;
+    uint8_t cycle_time_modified : 1;
+    uint8_t cycle_edit_temp_c;
+    uint8_t cycle_edit_duration_min;
+
+    // Cycle completion / anti-crease.
+    uint32_t cycle_total_time_ms; // heat_total + cooldown_elapsed (pause-aware)
+    uint32_t anticrease_start_ms;
+    uint32_t tumble_cycle_start_ms;
+    uint32_t tumble_start_ms;
+    uint8_t anticrease_page; // 0=summary, 1=active
+    uint8_t tumble_state;    // 0=idle, 1=tumbling
 #endif
 
 #if ENABLE_SETTINGS_MENU
@@ -88,6 +126,13 @@ private:
     uint8_t fault_history_index;
     uint8_t fault_history_page; // 0=view, 1=confirm clear
 #endif
+#if ENABLE_SERVICE_IO_TEST
+    uint8_t io_test_page;      // 0=outputs, 1=sensors
+    uint8_t io_test_selection; // 0=heater,1=fwd,2=rev,3=aux (optional)
+    uint8_t io_test_out_mask;  // bit0=heater, bit1=fwd, bit2=rev, bit3=aux
+    uint32_t io_test_last_update_ms;
+    uint32_t io_test_last_sig;
+#endif
 #if ENABLE_SERVICE_DRUM_TEST
     uint8_t service_last_dir;
 #endif
@@ -107,6 +152,10 @@ private:
     uint8_t service_autotune_page;
     uint32_t service_autotune_last_update_ms;
     uint32_t service_autotune_start_ms;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+    uint8_t service_mem_page;
+    uint32_t service_mem_last_update_ms;
 #endif
 #endif
 
@@ -137,6 +186,14 @@ private:
   void renderStartDelay_();
   void renderRunningHeat_();
   void updateRunningHeatUi_();
+  void renderRunningCooldown_();
+  void updateRunningCooldownUi_();
+  void renderPaused_();
+  void updatePausedUi_();
+  void renderCycleEdit_();
+  void renderCycleCompleteSummary_();
+  void renderAntiCreaseActive_();
+  void updateAntiCreaseUi_();
 #endif
 
 #if ENABLE_SETTINGS_MENU
@@ -165,6 +222,10 @@ private:
   void renderPidView_();
   void updatePidView_();
 #endif
+#if ENABLE_SERVICE_IO_TEST
+  void renderIoTest_();
+  void updateIoTestUi_();
+#endif
 #if ENABLE_SERVICE_FOPDT_ID
   void renderFopdt_();
   void updateFopdt_();
@@ -173,6 +234,9 @@ private:
   void renderAutoTunePre_();
   void renderAutoTune_();
   void updateAutoTuneUi_();
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+  void renderMemoryInfo_();
 #endif
 #endif
 };

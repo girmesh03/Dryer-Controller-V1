@@ -80,6 +80,7 @@ public:
 
 private:
   static constexpr uint16_t EEPROM_USED_BYTES = 0x200; // 512 bytes reserved (Appendix D)
+  static constexpr uint16_t EEPROM_TOTAL_BYTES = 0x400; // 1024 bytes total (target/platform capacity)
 
   static constexpr uint16_t ADDR_MAGIC = 0x000;
   static constexpr uint16_t ADDR_VERSION = 0x002;
@@ -139,6 +140,13 @@ private:
 
   void writeFloat(uint16_t addr, float value);
   float readFloat(uint16_t addr) const;
+
+public:
+  // Reserved EEPROM map size (Appendix D).
+  // Exposed for the Phase 11 "MEMORY INFO" service screen.
+  static constexpr uint16_t reservedBytes() { return EEPROM_USED_BYTES; }
+  static constexpr uint16_t layoutUsedBytes() { return static_cast<uint16_t>(ADDR_FAULT_HISTORY_HEAD + 1u); }
+  static constexpr uint16_t totalBytes() { return EEPROM_TOTAL_BYTES; }
 };
 
 #endif

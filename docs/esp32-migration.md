@@ -57,7 +57,9 @@ Relays are treated as **active-LOW** in firmware:
 
 #### LCD reliability note (ESP32 + PCF8574 backpacks)
 
-Some PCF8574 I2C LCD backpacks can show a “missing first character” glitch (e.g. `AULT HISTORY`) if the bus is too fast or cursor/clear commands don’t have enough settling time.
+In this project, a “missing first character” symptom (e.g. `AULT HISTORY`) was traced primarily to a **firmware LCD line wrap** issue: some screens padded with an off-by-one count, which caused an extra character to wrap around and overwrite column `(0,0)`.
+
+Phase 11 fixes the affected screens by correcting padding so no line ever prints past 20 columns.
 
 If you still see missing characters:
 - Verify the LCD backpack is powered correctly (3.3V-safe I2C pull-ups; avoid 5V pull-ups into ESP32).
@@ -65,7 +67,11 @@ If you still see missing characters:
 
 ## EEPROM on ESP32
 
-ESP32 uses **flash-emulated EEPROM**. `EEPROMStore::init()` calls `EEPROM.begin(512)` and writes are finalized with `EEPROM.commit()` when changes are flushed.
+ESP32 uses **flash-emulated EEPROM**. `EEPROMStore::init()` calls `EEPROM.begin(1024)` (1KB total) and writes are finalized with `EEPROM.commit()` when changes are flushed.
+
+Notes:
+- The current CRC-protected reserved map uses the first **512 bytes** (Appendix D / `design.md`).
+- The remaining bytes are intentionally left unused for future phases.
 
 ## Watchdog / Reset Cause
 

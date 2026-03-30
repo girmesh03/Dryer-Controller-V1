@@ -328,11 +328,30 @@ void loop()
   if (now - last_drum_ms >= FAST_LOOP_PERIOD)
   {
     last_drum_ms = now;
-    drumControl.update();
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_IO_TEST
+    if (app.isIoTestActive())
+    {
+      bool heater_on = false;
+      bool motor_fwd_on = false;
+      bool motor_rev_on = false;
+      bool aux_on = false;
+      app.getIoTestOutputs(heater_on, motor_fwd_on, motor_rev_on, aux_on);
+      (void)heater_on; // Heater is driven via HeaterControl + io.setHeaterRelay().
 
-    const auto dir = drumControl.getCurrentDirection();
-    io.setMotorForward(dir == DrumControl::Direction::FORWARD);
-    io.setMotorReverse(dir == DrumControl::Direction::REVERSE);
+      io.setMotorForward(motor_fwd_on);
+      io.setMotorReverse(motor_rev_on);
+      io.setAuxRelay(aux_on);
+    }
+    else
+#endif
+    {
+      drumControl.update();
+
+      const auto dir = drumControl.getCurrentDirection();
+      io.setMotorForward(dir == DrumControl::Direction::FORWARD);
+      io.setMotorReverse(dir == DrumControl::Direction::REVERSE);
+      io.setAuxRelay(false); // Reserved relay stays OFF in normal operation.
+    }
   }
 
   // Heater control: 10 Hz (100ms)

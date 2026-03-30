@@ -4,6 +4,9 @@
 #include <pgmspace.h>
 
 #include "config_build.h"
+#if defined(ESP32)
+#include <esp_ota_ops.h>
+#endif
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FACTORY_RESET
 #if defined(__AVR__)
 #include <avr/wdt.h>
@@ -16,8 +19,9 @@
 #include "pid_control.h"
 #include "ui_lcd.h"
 
-#if ENABLE_CYCLE_EXECUTION || \
-    (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE || ENABLE_SERVICE_FACTORY_RESET))
+#if ENABLE_CYCLE_EXECUTION ||                                                                                       \
+    (ENABLE_SERVICE_MENU &&                                                                                          \
+     (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE || ENABLE_SERVICE_FACTORY_RESET || ENABLE_SERVICE_IO_TEST))
 #include "io_abstraction.h"
 #endif
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_FOPDT_ID
@@ -36,8 +40,9 @@ extern FaultManager faultMgr;
 extern EEPROMStore::Settings g_settings;
 #endif
 
-#if ENABLE_CYCLE_EXECUTION || \
-    (ENABLE_SERVICE_MENU && (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE || ENABLE_SERVICE_FACTORY_RESET))
+#if ENABLE_CYCLE_EXECUTION ||                                                                                       \
+    (ENABLE_SERVICE_MENU &&                                                                                          \
+     (ENABLE_SERVICE_FOPDT_ID || ENABLE_SERVICE_AUTOTUNE || ENABLE_SERVICE_FACTORY_RESET || ENABLE_SERVICE_IO_TEST))
 extern IOAbstraction io;
 #endif
 #if ENABLE_SERVICE_MENU
@@ -76,6 +81,15 @@ namespace
 
   constexpr uint32_t kStartDelayMs = 1000u;
   constexpr uint32_t kRunUiRefreshMs = 1000u;
+  constexpr uint32_t kPauseTimeoutMs = 30ul * 60ul * 1000ul;
+  constexpr uint32_t kPauseTimeoutMsgMs = 1500u;
+
+  constexpr uint32_t kCooldownMaxMs = 15ul * 60ul * 1000ul;
+
+  constexpr uint32_t kCycleCompleteSummaryMs = 10ul * 1000ul;
+  constexpr uint32_t kAntiCreaseMaxMs = 2ul * 60ul * 60ul * 1000ul;
+  constexpr uint32_t kAntiCreaseTumbleEveryMs = 5ul * 60ul * 1000ul;
+  constexpr uint32_t kAntiCreaseTumbleDurationMs = 10ul * 1000ul;
 #endif
 
 #if ENABLE_SETTINGS_MENU
@@ -158,6 +172,19 @@ namespace
     return (prev < min_v) ? max_v : static_cast<uint8_t>(prev);
   }
 
+  uint8_t digitsU16_(uint16_t value)
+  {
+    if (value >= 10000u)
+      return 5u;
+    if (value >= 1000u)
+      return 4u;
+    if (value >= 100u)
+      return 3u;
+    if (value >= 10u)
+      return 2u;
+    return 1u;
+  }
+
 #if ENABLE_SERVICE_MENU
   constexpr uint8_t kServiceViewMenu = 0u;
 #if ENABLE_SERVICE_DRUM_TEST
@@ -172,6 +199,10 @@ namespace
 #endif
 #if ENABLE_SERVICE_IO_TEST
   constexpr uint8_t kServiceViewIoTest = 4u;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+  constexpr uint8_t kServiceViewMemoryInfo = 9u;
+  constexpr uint32_t kMemoryInfoRefreshMs = 1000u;
 #endif
 #if ENABLE_SERVICE_FOPDT_ID
   constexpr uint8_t kServiceViewFopdt = 5u;
@@ -209,6 +240,9 @@ namespace
 #if ENABLE_SERVICE_IO_TEST
     IO_TEST,
 #endif
+#if ENABLE_SERVICE_MEMORY_INFO
+    MEMORY_INFO,
+#endif
 #if ENABLE_SERVICE_FAULT_HISTORY
     FAULT_HISTORY,
 #endif
@@ -228,8 +262,8 @@ namespace
   // expression so it works under C++11 without extra init code.
   constexpr uint8_t kServiceMenuItems =
       static_cast<uint8_t>(ENABLE_SERVICE_DRUM_TEST + ENABLE_SERVICE_HEATER_TEST + ENABLE_SERVICE_PID_VIEW +
-                           ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_FAULT_HISTORY + ENABLE_SERVICE_FOPDT_ID +
-                           ENABLE_SERVICE_AUTOTUNE + ENABLE_SERVICE_FACTORY_RESET);
+                           ENABLE_SERVICE_IO_TEST + ENABLE_SERVICE_MEMORY_INFO + ENABLE_SERVICE_FAULT_HISTORY +
+                           ENABLE_SERVICE_FOPDT_ID + ENABLE_SERVICE_AUTOTUNE + ENABLE_SERVICE_FACTORY_RESET);
   static_assert(kServiceMenuItems > 0u, "Service menu enabled but no service tools enabled");
 
   ServiceItem serviceMenuItemByIndex_(uint8_t idx)
@@ -249,6 +283,10 @@ namespace
 #if ENABLE_SERVICE_IO_TEST
     if (idx-- == 0u)
       return ServiceItem::IO_TEST;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+    if (idx-- == 0u)
+      return ServiceItem::MEMORY_INFO;
 #endif
 #if ENABLE_SERVICE_FAULT_HISTORY
     if (idx-- == 0u)
@@ -276,6 +314,8 @@ namespace
     return ServiceItem::PID_VIEW;
 #elif ENABLE_SERVICE_IO_TEST
     return ServiceItem::IO_TEST;
+#elif ENABLE_SERVICE_MEMORY_INFO
+    return ServiceItem::MEMORY_INFO;
 #else
 #if ENABLE_SERVICE_FAULT_HISTORY
     return ServiceItem::FAULT_HISTORY;
@@ -445,8 +485,29 @@ void AppStateMachine::init()
   state_.cycle_setpoint_c = 0u;
   state_.cycle_duration_min = 0u;
   state_.cycle_duty_limit = 100u;
-  state_.cycle_end_ms = 0u;
   state_.cycle_last_ui_ms = 0u;
+  state_.cycle_orig_setpoint_c = 0u;
+  state_.cycle_orig_duration_min = 0u;
+  state_.heat_start_ms = 0u;
+  state_.heat_pause_total_ms = 0u;
+  state_.cooldown_start_ms = 0u;
+  state_.cooldown_pause_total_ms = 0u;
+  state_.pause_start_ms = 0u;
+  state_.paused_from_state = SystemState::IDLE;
+  state_.pause_timeout_msg_start_ms = 0u;
+  state_.pause_timeout_shown = 0u;
+  state_.cycle_edit_active = 0u;
+  state_.cycle_edit_field = 0u;
+  state_.cycle_temp_modified = 0u;
+  state_.cycle_time_modified = 0u;
+  state_.cycle_edit_temp_c = 0u;
+  state_.cycle_edit_duration_min = 0u;
+  state_.cycle_total_time_ms = 0u;
+  state_.anticrease_start_ms = 0u;
+  state_.tumble_cycle_start_ms = 0u;
+  state_.tumble_start_ms = 0u;
+  state_.anticrease_page = 0u;
+  state_.tumble_state = 0u;
 #endif
 
 #if ENABLE_SETTINGS_MENU
@@ -468,6 +529,13 @@ void AppStateMachine::init()
   state_.fault_history_index = 0u;
   state_.fault_history_page = 0u;
 #endif
+#if ENABLE_SERVICE_IO_TEST
+  state_.io_test_page = 0u;
+  state_.io_test_selection = 0u;
+  state_.io_test_out_mask = 0u;
+  state_.io_test_last_update_ms = 0u;
+  state_.io_test_last_sig = 0u;
+#endif
 #if ENABLE_SERVICE_DRUM_TEST
   state_.service_last_dir = 255u;
 #endif
@@ -488,6 +556,10 @@ void AppStateMachine::init()
   state_.service_autotune_last_update_ms = 0u;
   state_.service_autotune_start_ms = 0u;
 #endif
+#if ENABLE_SERVICE_MEMORY_INFO
+  state_.service_mem_page = 0u;
+  state_.service_mem_last_update_ms = 0u;
+#endif
 #endif
 
   state_.invalid_key_until_ms = 0;
@@ -501,6 +573,32 @@ SystemState AppStateMachine::getCurrentState() const
 {
   return state_.current_state;
 }
+
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_IO_TEST
+bool AppStateMachine::isIoTestActive() const
+{
+  return (state_.current_state == SystemState::SERVICE) && (state_.service_view == kServiceViewIoTest);
+}
+
+void AppStateMachine::getIoTestOutputs(bool& heater_on, bool& motor_fwd_on, bool& motor_rev_on, bool& aux_on) const
+{
+  heater_on = false;
+  motor_fwd_on = false;
+  motor_rev_on = false;
+  aux_on = false;
+
+  if (!isIoTestActive())
+  {
+    return;
+  }
+
+  const uint8_t mask = state_.io_test_out_mask;
+  heater_on = (mask & 0x01u) != 0u;
+  motor_fwd_on = (mask & 0x02u) != 0u;
+  motor_rev_on = (mask & 0x04u) != 0u;
+  aux_on = (mask & 0x08u) != 0u;
+}
+#endif
 
 bool AppStateMachine::canTransition_(SystemState from, SystemState to) const
 {
@@ -558,8 +656,15 @@ bool AppStateMachine::canTransition_(SystemState from, SystemState to) const
   case SystemState::START_DELAY:
     return (to == SystemState::RUNNING_HEAT) || (to == SystemState::IDLE) || (to == SystemState::FAULT);
   case SystemState::RUNNING_HEAT:
-    return (to == SystemState::RUNNING_COOLDOWN) || (to == SystemState::IDLE) || (to == SystemState::FAULT);
+    return (to == SystemState::RUNNING_COOLDOWN) || (to == SystemState::PAUSED) || (to == SystemState::IDLE) ||
+           (to == SystemState::FAULT);
   case SystemState::RUNNING_COOLDOWN:
+    return (to == SystemState::ANTI_CREASE) || (to == SystemState::PAUSED) || (to == SystemState::IDLE) ||
+           (to == SystemState::FAULT);
+  case SystemState::PAUSED:
+    return (to == SystemState::RUNNING_HEAT) || (to == SystemState::RUNNING_COOLDOWN) || (to == SystemState::IDLE) ||
+           (to == SystemState::FAULT);
+  case SystemState::ANTI_CREASE:
     return (to == SystemState::IDLE) || (to == SystemState::FAULT);
 #endif
 #if ENABLE_SERVICE_MENU
@@ -633,8 +738,29 @@ void AppStateMachine::onEnter_(SystemState new_state)
     break;
 
   case SystemState::RUNNING_HEAT:
+  {
+    const uint32_t now_ms = millis();
+
+    if (state_.previous_state == SystemState::START_DELAY)
+    {
+      // Fresh cycle start: capture original parameters (Req 13 limits).
+      state_.cycle_orig_setpoint_c = state_.cycle_setpoint_c;
+      state_.cycle_orig_duration_min = state_.cycle_duration_min;
+      state_.cycle_temp_modified = 0u;
+      state_.cycle_time_modified = 0u;
+      state_.cycle_edit_active = 0u;
+      state_.cycle_edit_field = 0u;
+
+      // Phase timing baselines.
+      state_.heat_start_ms = now_ms;
+      state_.heat_pause_total_ms = 0u;
+      state_.cooldown_start_ms = 0u;
+      state_.cooldown_pause_total_ms = 0u;
+      state_.cycle_total_time_ms = 0u;
+    }
+
     // Phase 6: PID bumpless transfer occurs on RUNNING_HEAT entry.
-    // Prepare PID and heater gating for a fresh cycle start.
+    // Prepare PID and heater gating for (re)entry.
     pidController.setOutputLimits(0.0f, 0.0f); // force output/integral to 0
     pidController.setOutputLimits(0.0f, static_cast<float>((state_.cycle_duty_limit > 100u) ? 100u
                                                                                             : state_.cycle_duty_limit));
@@ -659,17 +785,86 @@ void AppStateMachine::onEnter_(SystemState new_state)
     }
     drumControl.start();
 
-    // Heating timer (minutes → ms).
-    state_.cycle_end_ms =
-        millis() + (static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul);
     state_.cycle_last_ui_ms = 0u;
     renderRunningHeat_();
     break;
+  }
 
   case SystemState::RUNNING_COOLDOWN:
-    // Phase 11 extends this; keep safe behavior for now.
+  {
+    const uint32_t now_ms = millis();
+
+    heaterControl.setDutyCycle(0.0f);
     heaterControl.disable();
+
+    // Start cooldown timing on first entry.
+    if (state_.previous_state == SystemState::RUNNING_HEAT)
+    {
+      state_.cooldown_start_ms = now_ms;
+      state_.cooldown_pause_total_ms = 0u;
+    }
+
+    // Keep drum turning during cooldown (Req 10).
+    if (!drumControl.isRunning())
+    {
+      drumControl.start();
+    }
+
+    state_.cycle_last_ui_ms = 0u;
+    state_.cycle_edit_active = 0u;
+    renderRunningCooldown_();
     break;
+  }
+
+  case SystemState::PAUSED:
+    // Pause is only reachable from RUNNING_HEAT/COOLDOWN (Req 26).
+    state_.paused_from_state = state_.previous_state;
+    state_.pause_start_ms = millis();
+    state_.pause_timeout_shown = 0u;
+    state_.pause_timeout_msg_start_ms = 0u;
+
+    // Force outputs OFF.
+    heaterControl.setDutyCycle(0.0f);
+    heaterControl.disable();
+    drumControl.stop();
+
+    // Prevent output jump on resume: clamp PID output to 0 while paused.
+    pidController.setOutputLimits(0.0f, 0.0f);
+    pidController.reset();
+
+    renderPaused_();
+    break;
+
+  case SystemState::ANTI_CREASE:
+  {
+    const uint32_t now_ms = millis();
+
+    // Heater must remain OFF (Req 11).
+    heaterControl.setDutyCycle(0.0f);
+    heaterControl.disable();
+
+    // Anti-crease starts from a stopped drum, then tumbles periodically.
+    drumControl.stop();
+
+    // Compute total time (heat total + cooldown elapsed), pause-aware.
+    const uint32_t heat_total_ms = static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul;
+    uint32_t cooldown_elapsed_ms = 0u;
+    if (state_.cooldown_start_ms != 0u)
+    {
+      cooldown_elapsed_ms = now_ms - state_.cooldown_start_ms - state_.cooldown_pause_total_ms;
+    }
+    state_.cycle_total_time_ms = heat_total_ms + cooldown_elapsed_ms;
+
+    state_.anticrease_start_ms = now_ms;
+    state_.anticrease_page = 0u; // summary first
+    state_.tumble_state = 0u;
+    state_.tumble_cycle_start_ms = now_ms;
+    state_.tumble_start_ms = 0u;
+
+    state_.cycle_last_ui_ms = 0u;
+    renderCycleCompleteSummary_();
+    break;
+  }
 #else
   case SystemState::RUNNING_HEAT:
     // Cycle execution compiled out.
@@ -835,7 +1030,98 @@ void AppStateMachine::renderFault_()
 
 void AppStateMachine::restoreScreen_()
 {
-  onEnter_(state_.current_state);
+  // Re-render the current screen without re-running entry actions that may
+  // have side effects (e.g., restarting control loops).
+  switch (state_.current_state)
+  {
+  case SystemState::BOOT:
+    lcd.showBootScreen();
+    break;
+  case SystemState::IDLE:
+    lcd.showMainMenu(state_.menu_selection);
+    state_.last_temp_valid = tempSensor.isValid() ? 1u : 0u;
+    lcd.showTemperature(tempSensor.getTemperature(), state_.last_temp_valid != 0u);
+    break;
+  case SystemState::PROGRAM_SELECT:
+    renderProgramSelect_();
+    break;
+  case SystemState::PARAM_EDIT:
+    if (state_.param_mode == kParamModeAuto)
+    {
+      const bool editing = (state_.auto_flags & kAutoFlagEditing) != 0u;
+      editing ? renderAutoParamEdit_() : renderAutoParamReview_();
+    }
+    else
+    {
+#if ENABLE_CYCLE_EXECUTION
+      (state_.manual_view == kManualViewDuration) ? renderManualDuration_() : renderManualTemp_();
+#endif
+    }
+    break;
+  case SystemState::READY:
+#if ENABLE_CYCLE_EXECUTION
+    if (state_.param_mode == kParamModeManual)
+    {
+      renderManualConfirm_();
+    }
+#endif
+    break;
+#if ENABLE_SETTINGS_MENU
+  case SystemState::SETTINGS:
+    renderSettings_();
+    break;
+#endif
+#if ENABLE_SERVICE_MENU
+  case SystemState::SERVICE:
+    renderService_();
+    break;
+#if ENABLE_SERVICE_AUTOTUNE
+  case SystemState::AUTOTUNE:
+    renderAutoTune_();
+    break;
+#endif
+#endif
+#if ENABLE_CYCLE_EXECUTION
+  case SystemState::START_DELAY:
+    renderStartDelay_();
+    break;
+  case SystemState::RUNNING_HEAT:
+    if (state_.cycle_edit_active != 0u)
+    {
+      renderCycleEdit_();
+    }
+    else
+    {
+      renderRunningHeat_();
+      state_.cycle_last_ui_ms = 0u;
+      updateRunningHeatUi_();
+    }
+    break;
+  case SystemState::RUNNING_COOLDOWN:
+    renderRunningCooldown_();
+    state_.cycle_last_ui_ms = 0u;
+    updateRunningCooldownUi_();
+    break;
+  case SystemState::PAUSED:
+    renderPaused_();
+    break;
+  case SystemState::ANTI_CREASE:
+    if (state_.anticrease_page == 0u)
+    {
+      renderCycleCompleteSummary_();
+    }
+    else
+    {
+      renderAntiCreaseActive_();
+    }
+    break;
+#endif
+  case SystemState::FAULT:
+    renderFault_();
+    break;
+  default:
+    break;
+  }
 }
 
 void AppStateMachine::showInvalidKey_()
@@ -855,6 +1141,23 @@ namespace
 
   void lcdPrintU16_NoLeading_(UILCD &out, uint16_t value)
   {
+    if (value >= 10000u)
+    {
+      out.print(static_cast<char>('0' + (value / 10000u)));
+      out.print(static_cast<char>('0' + ((value / 1000u) % 10u)));
+      out.print(static_cast<char>('0' + ((value / 100u) % 10u)));
+      out.print(static_cast<char>('0' + ((value / 10u) % 10u)));
+      out.print(static_cast<char>('0' + (value % 10u)));
+      return;
+    }
+    if (value >= 1000u)
+    {
+      out.print(static_cast<char>('0' + (value / 1000u)));
+      out.print(static_cast<char>('0' + ((value / 100u) % 10u)));
+      out.print(static_cast<char>('0' + ((value / 10u) % 10u)));
+      out.print(static_cast<char>('0' + (value % 10u)));
+      return;
+    }
     if (value >= 100u)
     {
       out.print(static_cast<char>('0' + ((value / 100u) % 10u)));
@@ -1096,13 +1399,14 @@ void AppStateMachine::renderManualTemp_()
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("MANUAL MODE"));
+  lcdPadSpacesToEol_(lcd, 11u);
 
   lcd.setCursor(0, 1);
   lcd.print(F("SET TEMPERATURE:"));
+  lcdPadSpacesToEol_(lcd, 16u);
 
   lcd.setCursor(0, 2);
-  lcd.print(F("TEMP: ["));
-
+  lcd.print('[');
   uint16_t t_disp = state_.manual_temp_c;
   char unit_char = 'C';
 #if ENABLE_SETTINGS_MENU
@@ -1113,12 +1417,14 @@ void AppStateMachine::renderManualTemp_()
   }
 #endif
   lcdPrintU16_NoLeading_(lcd, t_disp);
+  lcd.print(']');
   lcd.print(static_cast<char>(0xDF));
   lcd.print(unit_char);
-  lcd.print(']');
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(4u + ((t_disp >= 100u) ? 3u : 2u)));
 
   lcd.setCursor(0, 3);
-  lcd.print(F("UP/DN OK:NEXT"));
+  lcd.print(F("UP/DN:CHG OK:NEXT"));
+  lcdPadSpacesToEol_(lcd, 17u);
 }
 
 void AppStateMachine::renderManualDuration_()
@@ -1126,17 +1432,22 @@ void AppStateMachine::renderManualDuration_()
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("MANUAL MODE"));
+  lcdPadSpacesToEol_(lcd, 11u);
 
   lcd.setCursor(0, 1);
   lcd.print(F("SET DURATION:"));
+  lcdPadSpacesToEol_(lcd, 13u);
 
   lcd.setCursor(0, 2);
-  lcd.print(F("TIME: ["));
+  lcd.print('[');
   lcdPrintU16_NoLeading_(lcd, state_.manual_duration_min);
-  lcd.print(F(" MIN]"));
+  lcd.print(F("] MIN"));
+  const uint8_t d = (state_.manual_duration_min >= 100u) ? 3u : 2u;
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(d + 6u));
 
   lcd.setCursor(0, 3);
-  lcd.print(F("UP/DN OK:NEXT"));
+  lcd.print(F("UP/DN:CHG OK:NEXT"));
+  lcdPadSpacesToEol_(lcd, 17u);
 }
 
 void AppStateMachine::renderManualConfirm_()
@@ -1144,6 +1455,7 @@ void AppStateMachine::renderManualConfirm_()
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("MANUAL MODE"));
+  lcdPadSpacesToEol_(lcd, 11u);
 
   lcd.setCursor(0, 1);
   lcd.print(F("TEMP: "));
@@ -1159,15 +1471,18 @@ void AppStateMachine::renderManualConfirm_()
   lcdPrintU16_NoLeading_(lcd, t_disp);
   lcd.print(static_cast<char>(0xDF));
   lcd.print(unit_char);
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(8u + ((t_disp >= 100u) ? 3u : 2u)));
 
   lcd.setCursor(0, 2);
   lcd.print(F("TIME: "));
   lcdPrintU16_NoLeading_(lcd, state_.manual_duration_min);
   lcd.print(F(" MIN"));
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(10u + ((state_.manual_duration_min >= 100u) ? 3u : 2u)));
 
   // Requirement 12B.35: exact hint.
   lcd.setCursor(0, 3);
   lcd.print(F("A:START B:CANCEL"));
+  lcdPadSpacesToEol_(lcd, 16u);
 }
 
 void AppStateMachine::renderStartDelay_()
@@ -1217,9 +1532,20 @@ void AppStateMachine::updateRunningHeatUi_()
   }
   const float pv_c = tempSensor.getTemperature();
 
-  if (now >= state_.cycle_end_ms)
+  const uint32_t total_ms = static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul;
+  const uint32_t elapsed_ms = (state_.heat_start_ms == 0u)
+                                  ? 0u
+                                  : (now - state_.heat_start_ms - state_.heat_pause_total_ms);
+
+  if (elapsed_ms >= total_ms)
   {
-    transitionTo(SystemState::IDLE);
+    transitionTo(SystemState::RUNNING_COOLDOWN);
+    return;
+  }
+
+  // Do not overwrite the in-cycle edit screen (but still enforce timing above).
+  if (state_.cycle_edit_active != 0u)
+  {
     return;
   }
 
@@ -1230,7 +1556,7 @@ void AppStateMachine::updateRunningHeatUi_()
   state_.cycle_last_ui_ms = now;
 
   // Remaining time (MM:SS).
-  const uint32_t rem_ms = state_.cycle_end_ms - now;
+  const uint32_t rem_ms = total_ms - elapsed_ms;
   const uint16_t rem_s = static_cast<uint16_t>(rem_ms / 1000ul);
   const uint16_t rem_min = static_cast<uint16_t>(rem_s / 60u);
   const uint8_t rem_sec = static_cast<uint8_t>(rem_s % 60u);
@@ -1264,14 +1590,16 @@ void AppStateMachine::updateRunningHeatUi_()
   lcd.setCursor(0, 1);
   lcd.print(F("SP:"));
   lcdPrintU16_3_(lcd, sp_disp);
+  if (state_.cycle_temp_modified != 0u)
+  {
+    lcd.print('*');
+  }
   lcd.print(F(" PV:"));
   lcdPrintU16_3_(lcd, pv_disp);
+  lcd.print(' ');
   lcd.print(static_cast<char>(0xDF));
   lcd.print(unit_char);
-  for (uint8_t i = 0u; i < 5u; i++)
-  {
-    lcd.print(' ');
-  }
+  lcdPadSpacesToEol_(lcd, (state_.cycle_temp_modified != 0u) ? 17u : 16u);
 
   // Line 3: TIME
   lcd.setCursor(0, 2);
@@ -1279,10 +1607,8 @@ void AppStateMachine::updateRunningHeatUi_()
   lcdPrintU16_3_(lcd, rem_min);
   lcd.print(':');
   lcdPrintU8_2_(lcd, rem_sec);
-  for (uint8_t i = 0u; i < 8u; i++)
-  {
-    lcd.print(' ');
-  }
+  lcd.print(state_.cycle_time_modified ? '*' : ' ');
+  lcdPadSpacesToEol_(lcd, 13u);
 
   // Line 4: status flags (Req 12A/12B.41/.50)
   lcd.setCursor(0, 3);
@@ -1290,11 +1616,385 @@ void AppStateMachine::updateRunningHeatUi_()
   const DrumControl::Direction dir = drumControl.getCurrentDirection();
   lcd.print((dir == DrumControl::Direction::FORWARD) ? 'F' : ' ');
   lcd.print((dir == DrumControl::Direction::REVERSE) ? 'R' : ' ');
-  lcd.print(F(" B:STOP"));
-  for (uint8_t i = 0u; i < 10u; i++)
+  lcd.print(F(" B:PAUSE"));
+  lcdPadSpacesToEol_(lcd, 11u);
+}
+
+void AppStateMachine::renderCycleEdit_()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("EDIT PARAMETERS"));
+  lcdPadSpacesToEol_(lcd, 15u);
+
+  // Line 2: TEMP
+  lcd.setCursor(0, 1);
+  lcd.print(F("TEMP: "));
+  uint16_t t_disp = state_.cycle_edit_temp_c;
+  char unit_char = 'C';
+#if ENABLE_SETTINGS_MENU
+  if (getTempUnit_() == kTempUnitF)
   {
-    lcd.print(' ');
+    t_disp = cToF_u8(state_.cycle_edit_temp_c);
+    unit_char = 'F';
   }
+#endif
+  if (state_.cycle_edit_field == 0u)
+    lcd.print('[');
+  lcdPrintU16_NoLeading_(lcd, t_disp);
+  if (state_.cycle_edit_field == 0u)
+    lcd.print(']');
+  lcd.print(static_cast<char>(0xDF));
+  lcd.print(unit_char);
+
+  const uint8_t td = (t_disp >= 100u) ? 3u : 2u;
+  uint8_t used = static_cast<uint8_t>(6u + td + 2u + ((state_.cycle_edit_field == 0u) ? 2u : 0u));
+  lcdPadSpacesToEol_(lcd, used);
+
+  // Line 3: TIME
+  lcd.setCursor(0, 2);
+  lcd.print(F("TIME: "));
+  if (state_.cycle_edit_field != 0u)
+    lcd.print('[');
+  lcdPrintU16_NoLeading_(lcd, state_.cycle_edit_duration_min);
+  if (state_.cycle_edit_field != 0u)
+    lcd.print(']');
+  lcd.print(F(" MIN"));
+
+  const uint8_t md = (state_.cycle_edit_duration_min >= 100u) ? 3u : 2u;
+  used = static_cast<uint8_t>(6u + md + 4u + ((state_.cycle_edit_field != 0u) ? 2u : 0u));
+  lcdPadSpacesToEol_(lcd, used);
+
+  // Line 4: hint (Req 13 / Phase 11.4)
+  lcd.setCursor(0, 3);
+  lcd.print(F("UP/DN OK:SAVE"));
+  lcdPadSpacesToEol_(lcd, 13u);
+}
+
+void AppStateMachine::renderRunningCooldown_()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (state_.param_mode == kParamModeAuto)
+  {
+    lcd.print(F("AUTO: "));
+    lcd.print(state_.auto_program.name);
+  }
+  else
+  {
+    lcd.print(F("MANUAL MODE"));
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("COOLING DOWN"));
+  lcdPadSpacesToEol_(lcd, 12u);
+}
+
+void AppStateMachine::updateRunningCooldownUi_()
+{
+  const uint32_t now = millis();
+
+  if (!tempSensor.isValid())
+  {
+    return;
+  }
+
+  if (state_.cooldown_start_ms == 0u)
+  {
+    state_.cooldown_start_ms = now;
+    state_.cooldown_pause_total_ms = 0u;
+  }
+
+  const float pv_c = tempSensor.getTemperature();
+
+  const uint32_t elapsed_ms = now - state_.cooldown_start_ms - state_.cooldown_pause_total_ms;
+
+  // Transition conditions (Req 10 / Phase 11.5).
+  if (pv_c < static_cast<float>(COOLDOWN_THRESHOLD) || elapsed_ms >= kCooldownMaxMs)
+  {
+    transitionTo(SystemState::ANTI_CREASE);
+    return;
+  }
+
+  if (state_.cycle_last_ui_ms != 0u && (now - state_.cycle_last_ui_ms) < kRunUiRefreshMs)
+  {
+    return;
+  }
+  state_.cycle_last_ui_ms = now;
+
+  // PV display unit conversion (whole degrees).
+  int16_t pv_whole = static_cast<int16_t>(pv_c + ((pv_c >= 0.0f) ? 0.5f : -0.5f));
+  if (pv_whole < 0)
+    pv_whole = 0;
+  if (pv_whole > 999)
+    pv_whole = 999;
+  uint16_t pv_disp = static_cast<uint16_t>(pv_whole);
+  char unit_char = 'C';
+
+#if ENABLE_SETTINGS_MENU
+  if (getTempUnit_() == kTempUnitF)
+  {
+    const float pv_f = (pv_c * 1.8f) + 32.0f;
+    pv_whole = static_cast<int16_t>(pv_f + ((pv_f >= 0.0f) ? 0.5f : -0.5f));
+    if (pv_whole < 0)
+      pv_whole = 0;
+    if (pv_whole > 999)
+      pv_whole = 999;
+    pv_disp = static_cast<uint16_t>(pv_whole);
+    unit_char = 'F';
+  }
+#endif
+
+  const uint16_t elapsed_s = static_cast<uint16_t>(elapsed_ms / 1000ul);
+  const uint8_t e_min = static_cast<uint8_t>((elapsed_s / 60u) % 100u);
+  const uint8_t e_sec = static_cast<uint8_t>(elapsed_s % 60u);
+
+  // Line 3: PV + TIME
+  lcd.setCursor(0, 2);
+  lcd.print(F("PV:"));
+  lcdPrintU16_3_(lcd, pv_disp);
+  lcd.print(static_cast<char>(0xDF));
+  lcd.print(unit_char);
+  lcd.print(F(" TIME:"));
+  lcdPrintU8_2_(lcd, e_min);
+  lcd.print(':');
+  lcdPrintU8_2_(lcd, e_sec);
+  lcdPadSpacesToEol_(lcd, 19u);
+
+  // Line 4: motor status only (no heater indicator).
+  lcd.setCursor(0, 3);
+  const DrumControl::Direction dir = drumControl.getCurrentDirection();
+  const char d = (dir == DrumControl::Direction::FORWARD) ? 'F' : (dir == DrumControl::Direction::REVERSE) ? 'R'
+                                                                                                           : ' ';
+  lcd.print(d);
+  lcd.print(F(" B:PAUSE"));
+  lcdPadSpacesToEol_(lcd, 9u);
+}
+
+void AppStateMachine::renderPaused_()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (state_.param_mode == kParamModeAuto)
+  {
+    lcd.print(F("AUTO: "));
+    lcd.print(state_.auto_program.name);
+  }
+  else
+  {
+    lcd.print(F("MANUAL MODE"));
+  }
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("** PAUSED **"));
+  lcdPadSpacesToEol_(lcd, 12u);
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("A:RESUME B:ABORT"));
+  lcdPadSpacesToEol_(lcd, 16u);
+
+  // Line 4: elapsed time (cycle progress).
+  uint32_t elapsed_ms = 0u;
+  if (state_.paused_from_state == SystemState::RUNNING_HEAT)
+  {
+    const uint32_t now_ms = state_.pause_start_ms;
+    elapsed_ms = (state_.heat_start_ms == 0u) ? 0u : (now_ms - state_.heat_start_ms - state_.heat_pause_total_ms);
+  }
+  else if (state_.paused_from_state == SystemState::RUNNING_COOLDOWN)
+  {
+    const uint32_t heat_total_ms = static_cast<uint32_t>(state_.cycle_duration_min) * 60ul * 1000ul;
+    const uint32_t now_ms = state_.pause_start_ms;
+    const uint32_t cd_elapsed =
+        (state_.cooldown_start_ms == 0u) ? 0u : (now_ms - state_.cooldown_start_ms - state_.cooldown_pause_total_ms);
+    elapsed_ms = heat_total_ms + cd_elapsed;
+  }
+
+  const uint16_t elapsed_s = static_cast<uint16_t>(elapsed_ms / 1000ul);
+  const uint16_t e_min = static_cast<uint16_t>(elapsed_s / 60u);
+  const uint8_t e_sec = static_cast<uint8_t>(elapsed_s % 60u);
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("ELAPSED: "));
+  lcdPrintU16_3_(lcd, e_min);
+  lcd.print(':');
+  lcdPrintU8_2_(lcd, e_sec);
+  lcdPadSpacesToEol_(lcd, 15u);
+}
+
+void AppStateMachine::updatePausedUi_()
+{
+  const uint32_t now = millis();
+
+  if (state_.pause_timeout_shown != 0u)
+  {
+    if (now - state_.pause_timeout_msg_start_ms >= kPauseTimeoutMsgMs)
+    {
+      transitionTo(SystemState::IDLE);
+    }
+    return;
+  }
+
+  if (state_.pause_start_ms != 0u && (now - state_.pause_start_ms) >= kPauseTimeoutMs)
+  {
+    // Abort after 30 minutes paused (Req 26).
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    if (state_.param_mode == kParamModeAuto)
+    {
+      lcd.print(F("AUTO: "));
+      lcd.print(state_.auto_program.name);
+    }
+    else
+    {
+      lcd.print(F("MANUAL MODE"));
+    }
+    lcd.setCursor(0, 1);
+    lcd.print(F("PAUSE TIMEOUT"));
+    lcdPadSpacesToEol_(lcd, 12u);
+    lcd.setCursor(0, 2);
+    lcd.print(F("ABORTING..."));
+    lcdPadSpacesToEol_(lcd, 11u);
+    lcd.setCursor(0, 3);
+    lcd.print(F("RETURNING TO MENU"));
+    lcdPadSpacesToEol_(lcd, 17u);
+
+    state_.pause_timeout_shown = 1u;
+    state_.pause_timeout_msg_start_ms = now;
+  }
+}
+
+void AppStateMachine::renderCycleCompleteSummary_()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("CYCLE COMPLETE"));
+  lcdPadSpacesToEol_(lcd, 14u);
+
+  lcd.setCursor(0, 1);
+  if (state_.param_mode == kParamModeAuto)
+  {
+    lcd.print(state_.auto_program.name);
+    uint8_t used = 0u;
+    for (uint8_t i = 0u; i < 12u; i++)
+    {
+      if (state_.auto_program.name[i] == '\0')
+        break;
+      used++;
+    }
+    lcdPadSpacesToEol_(lcd, used);
+  }
+  else
+  {
+    lcd.print(F("MANUAL MODE"));
+    lcdPadSpacesToEol_(lcd, 11u);
+  }
+
+  const uint32_t total_s = state_.cycle_total_time_ms / 1000ul;
+  const uint16_t t_min = static_cast<uint16_t>(total_s / 60u);
+  const uint8_t t_sec = static_cast<uint8_t>(total_s % 60u);
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("TOTAL TIME: "));
+  lcdPrintU16_3_(lcd, t_min);
+  lcd.print(':');
+  lcdPrintU8_2_(lcd, t_sec);
+  lcdPadSpacesToEol_(lcd, 18u);
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("PRESS ANY KEY"));
+  lcdPadSpacesToEol_(lcd, 13u);
+}
+
+void AppStateMachine::renderAntiCreaseActive_()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("CYCLE COMPLETE"));
+  lcdPadSpacesToEol_(lcd, 14u);
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("ANTI-CREASE ACTIVE"));
+  lcdPadSpacesToEol_(lcd, 18u);
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("ELAPSED: 00:00"));
+  lcdPadSpacesToEol_(lcd, 14u);
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("PRESS STOP TO EXIT"));
+  lcdPadSpacesToEol_(lcd, 18u);
+}
+
+void AppStateMachine::updateAntiCreaseUi_()
+{
+  const uint32_t now = millis();
+
+  // Door open ends anti-crease immediately (Req 11.6).
+  if (!io.isDoorClosed())
+  {
+    drumControl.stop();
+    transitionTo(SystemState::IDLE);
+    return;
+  }
+
+  if (now - state_.anticrease_start_ms >= kAntiCreaseMaxMs)
+  {
+    drumControl.stop();
+    transitionTo(SystemState::IDLE);
+    return;
+  }
+
+  if (state_.anticrease_page == 0u)
+  {
+    if (now - state_.state_entry_time_ms >= kCycleCompleteSummaryMs)
+    {
+      state_.anticrease_page = 1u;
+      state_.tumble_state = 0u;
+      state_.tumble_cycle_start_ms = now;
+      state_.tumble_start_ms = 0u;
+      renderAntiCreaseActive_();
+    }
+    return;
+  }
+
+  // Active anti-crease periodic tumbling.
+  if (state_.tumble_state == 0u)
+  {
+    if (now - state_.tumble_cycle_start_ms >= kAntiCreaseTumbleEveryMs)
+    {
+      drumControl.start();
+      state_.tumble_state = 1u;
+      state_.tumble_start_ms = now;
+    }
+  }
+  else
+  {
+    if (now - state_.tumble_start_ms >= kAntiCreaseTumbleDurationMs)
+    {
+      drumControl.stop();
+      state_.tumble_state = 0u;
+      state_.tumble_cycle_start_ms = now;
+    }
+  }
+
+  // Update elapsed HH:MM display every second.
+  if (state_.cycle_last_ui_ms != 0u && (now - state_.cycle_last_ui_ms) < kRunUiRefreshMs)
+  {
+    return;
+  }
+  state_.cycle_last_ui_ms = now;
+
+  const uint32_t elapsed_ms = now - state_.anticrease_start_ms;
+  const uint32_t elapsed_min_total = elapsed_ms / 60000ul;
+  const uint16_t hh = static_cast<uint16_t>((elapsed_min_total / 60ul) % 100ul);
+  const uint8_t mm = static_cast<uint8_t>(elapsed_min_total % 60ul);
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("ELAPSED: "));
+  lcdPrintU8_2_(lcd, static_cast<uint8_t>(hh));
+  lcd.print(':');
+  lcdPrintU8_2_(lcd, mm);
+  lcdPadSpacesToEol_(lcd, 14u);
 }
 #endif // ENABLE_CYCLE_EXECUTION
 
@@ -1399,8 +2099,9 @@ void AppStateMachine::renderSettingsSound_()
 void AppStateMachine::renderProgramList_()
 {
   lcd.clear();
-  // After lcd.clear() the cursor is already at (0,0).
-  lcd.print(F(" PROGRAM EDITOR      "));
+  // Print a full line to avoid any wrap/padding overwriting (LCD-safe).
+  lcd.setCursor(0, 0);
+  lcd.print(F("PROGRAM EDITOR      "));
 
   const uint8_t sel =
       (state_.program_list_selection >= EEPROMStore::PROGRAM_COUNT) ? 0u : state_.program_list_selection;
@@ -1443,7 +2144,7 @@ void AppStateMachine::renderProgramList_()
   // Line 4: hints
   lcd.setCursor(0, 3);
   lcd.print(F("UP/DN OK:SELECT"));
-  lcdPadSpacesToEol_(lcd, 14u);
+  lcdPadSpacesToEol_(lcd, 15u);
 }
 
 void AppStateMachine::renderProgramEdit_()
@@ -1651,13 +2352,12 @@ void AppStateMachine::renderService_()
 #endif
 #if ENABLE_SERVICE_IO_TEST
   case kServiceViewIoTest:
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("I/O TEST"));
-    lcd.setCursor(0, 2);
-    lcd.print(F("PLANNED: PHASE 11"));
-    lcd.setCursor(0, 3);
-    lcd.print(F("B:BACK"));
+    renderIoTest_();
+    break;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+  case kServiceViewMemoryInfo:
+    renderMemoryInfo_();
     break;
 #endif
 #if ENABLE_SERVICE_FAULT_HISTORY
@@ -1750,6 +2450,11 @@ void AppStateMachine::renderServiceMenu_()
 #if ENABLE_SERVICE_IO_TEST
     case ServiceItem::IO_TEST:
       lcd.print(F("I/O TEST          "));
+      break;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+    case ServiceItem::MEMORY_INFO:
+      lcd.print(F("MEMORY INFO       "));
       break;
 #endif
 #if ENABLE_SERVICE_FAULT_HISTORY
@@ -1861,8 +2566,9 @@ void AppStateMachine::renderFaultHistory_()
   }
 
   lcd.clear();
-  // After lcd.clear() the cursor is already at (0,0).
-  lcd.print(F(" FAULT HISTORY       "));
+  // Print a full line to avoid any wrap/padding overwriting (LCD-safe).
+  lcd.setCursor(0, 0);
+  lcd.print(F("FAULT HISTORY       "));
 
   if (count == 0u)
   {
@@ -1981,7 +2687,7 @@ void AppStateMachine::renderFaultHistory_()
   // Line 4: hints.
   lcd.setCursor(0, 3);
   lcd.print(F("UP/DN C:CLEAR B:BACK"));
-  lcdPadSpacesToEol_(lcd, 19u);
+  lcdPadSpacesToEol_(lcd, 20u);
 }
 #endif // ENABLE_SERVICE_FAULT_HISTORY
 
@@ -2169,6 +2875,426 @@ void AppStateMachine::renderPidView_()
   updatePidView_();
 }
 #endif // ENABLE_SERVICE_PID_VIEW
+
+#if ENABLE_SERVICE_IO_TEST
+namespace
+{
+  constexpr uint8_t kIoMaskHeater = 0x01u;
+  constexpr uint8_t kIoMaskMotorFwd = 0x02u;
+  constexpr uint8_t kIoMaskMotorRev = 0x04u;
+  constexpr uint8_t kIoMaskAux = 0x08u;
+  constexpr uint8_t kIoOutputCount = 4u;
+
+  uint16_t toScaled10_(float v)
+  {
+    if (v <= 0.0f)
+    {
+      return 0u;
+    }
+    const float x = (v * 10.0f) + 0.5f;
+    if (x >= 9999.0f)
+    {
+      return 9999u;
+    }
+    return static_cast<uint16_t>(x);
+  }
+
+  void printTemp10_(UILCD& out, uint16_t scaled10)
+  {
+    const uint16_t whole = static_cast<uint16_t>(scaled10 / 10u);
+    const uint8_t frac = static_cast<uint8_t>(scaled10 % 10u);
+    lcdPrintU16_NoLeading_(out, whole);
+    out.print('.');
+    out.print(static_cast<char>('0' + frac));
+  }
+
+  void renderIoOutputLine_(UILCD& out, uint8_t row, uint8_t idx, bool selected, uint8_t mask)
+  {
+    out.setCursor(0, row);
+    out.print(selected ? F("> ") : F("  "));
+
+    uint8_t label_len = 0u;
+    bool on = false;
+
+    switch (idx)
+    {
+    case 0u:
+      out.print(F("HEATER"));
+      label_len = 6u;
+      on = (mask & kIoMaskHeater) != 0u;
+      break;
+    case 1u:
+      out.print(F("MOTOR FWD"));
+      label_len = 9u;
+      on = (mask & kIoMaskMotorFwd) != 0u;
+      break;
+    case 2u:
+      out.print(F("MOTOR REV"));
+      label_len = 9u;
+      on = (mask & kIoMaskMotorRev) != 0u;
+      break;
+    default:
+      out.print(F("AUX RELAY"));
+      label_len = 9u;
+      on = (mask & kIoMaskAux) != 0u;
+      break;
+    }
+
+    out.print(F(": "));
+    out.print(on ? F("ON ") : F("OFF"));
+
+    const uint8_t used = static_cast<uint8_t>(2u + label_len + 2u + 3u);
+    lcdPadSpacesToEol_(out, used);
+  }
+} // namespace
+
+void AppStateMachine::renderIoTest_()
+{
+  if (state_.io_test_page == 0u)
+  {
+    // Header: include a compact temperature readout.
+    lcd.setCursor(0, 0);
+    lcd.print(F("I/O TEST "));
+
+    uint8_t used_cols = 8u;
+    if (tempSensor.isValid())
+    {
+      float pv = tempSensor.getTemperature();
+      char unit_char = 'C';
+#if ENABLE_SETTINGS_MENU
+      if (getTempUnit_() == kTempUnitF)
+      {
+        pv = (pv * 1.8f) + 32.0f;
+        unit_char = 'F';
+      }
+#endif
+      const uint16_t pv10 = toScaled10_(pv);
+      lcd.print(F("T:"));
+      printTemp10_(lcd, pv10);
+      lcd.print(static_cast<char>(0xDF));
+      lcd.print(unit_char);
+
+      used_cols = static_cast<uint8_t>(used_cols + 2u + digitsU16_(static_cast<uint16_t>(pv10 / 10u)) + 2u + 2u);
+    }
+    else
+    {
+      lcd.print(F("T:---.-"));
+      used_cols = static_cast<uint8_t>(used_cols + 6u);
+    }
+    lcdPadSpacesToEol_(lcd, used_cols);
+
+    // Normalize selection.
+    if (state_.io_test_selection >= kIoOutputCount)
+    {
+      state_.io_test_selection = 0u;
+    }
+    const uint8_t sel = state_.io_test_selection;
+    const uint8_t next = static_cast<uint8_t>((sel + 1u) % kIoOutputCount);
+
+    renderIoOutputLine_(lcd, 1u, sel, true, state_.io_test_out_mask);
+    renderIoOutputLine_(lcd, 2u, next, false, state_.io_test_out_mask);
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("UP/DN OK:TOG D:"));
+    lcd.print(io.isDoorClosed() ? F("CLSD") : F("OPEN"));
+    lcdPadSpacesToEol_(lcd, 19u);
+    return;
+  }
+
+  // Page: sensors
+  lcd.setCursor(0, 0);
+  lcd.print(F("I/O TEST SENSORS"));
+  lcdPadSpacesToEol_(lcd, 16u);
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("TEMP: "));
+  if (tempSensor.isValid())
+  {
+    float pv = tempSensor.getTemperature();
+    char unit_char = 'C';
+#if ENABLE_SETTINGS_MENU
+    if (getTempUnit_() == kTempUnitF)
+    {
+      pv = (pv * 1.8f) + 32.0f;
+      unit_char = 'F';
+    }
+#endif
+    const uint16_t pv10 = toScaled10_(pv);
+    const uint8_t d = digitsU16_(static_cast<uint16_t>(pv10 / 10u));
+    printTemp10_(lcd, pv10);
+    lcd.print(static_cast<char>(0xDF));
+    lcd.print(unit_char);
+    lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(10u + d));
+  }
+  else
+  {
+    lcd.print(F("---.-"));
+    lcdPadSpacesToEol_(lcd, 11u);
+  }
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("RAW:  "));
+  if (tempSensor.isValid())
+  {
+    float raw = tempSensor.getRawTemperature();
+    char unit_char = 'C';
+#if ENABLE_SETTINGS_MENU
+    if (getTempUnit_() == kTempUnitF)
+    {
+      raw = (raw * 1.8f) + 32.0f;
+      unit_char = 'F';
+    }
+#endif
+    const uint16_t raw10 = toScaled10_(raw);
+    const uint8_t d = digitsU16_(static_cast<uint16_t>(raw10 / 10u));
+    printTemp10_(lcd, raw10);
+    lcd.print(static_cast<char>(0xDF));
+    lcd.print(unit_char);
+    lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(10u + d));
+  }
+  else
+  {
+    lcd.print(F("---.-"));
+    lcdPadSpacesToEol_(lcd, 11u);
+  }
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("DOOR:"));
+  lcd.print(io.isDoorClosed() ? F("CLOSED") : F("OPEN  "));
+  lcd.print(F(" LT/RT"));
+  lcdPadSpacesToEol_(lcd, 17u);
+}
+
+void AppStateMachine::updateIoTestUi_()
+{
+  const uint32_t now = millis();
+
+  // Safety: door open forces outputs OFF and clears latched IO test selections
+  // so they do not restart automatically when the door closes.
+  if (!io.isDoorClosed())
+  {
+    if (state_.io_test_out_mask != 0u)
+    {
+      state_.io_test_out_mask = 0u;
+      heaterControl.setDutyCycle(0.0f);
+      heaterControl.disable();
+      drumControl.stop();
+      io.emergencyStop();
+      state_.io_test_last_update_ms = 0u;
+    }
+  }
+
+  if (state_.io_test_last_update_ms != 0u && (now - state_.io_test_last_update_ms) < 250u)
+  {
+    return;
+  }
+
+  // Avoid LCD flicker: only re-render if the displayed values changed.
+  // (Other service views use the same "update on change" strategy.)
+  uint32_t sig = 2166136261u; // FNV-1a
+  auto mix = [&sig](uint32_t v)
+  {
+    sig ^= v;
+    sig *= 16777619u;
+  };
+
+  mix(static_cast<uint32_t>(state_.io_test_page));
+  mix(static_cast<uint32_t>(state_.io_test_selection));
+  mix(static_cast<uint32_t>(state_.io_test_out_mask));
+  mix(io.isDoorClosed() ? 1u : 0u);
+
+  uint8_t unit = 0u;
+#if ENABLE_SETTINGS_MENU
+  if (getTempUnit_() == kTempUnitF)
+  {
+    unit = 1u;
+  }
+#endif
+  mix(static_cast<uint32_t>(unit));
+
+  const bool valid = tempSensor.isValid();
+  mix(valid ? 1u : 0u);
+  if (valid)
+  {
+    float pv = tempSensor.getTemperature();
+    float raw = tempSensor.getRawTemperature();
+    if (unit != 0u)
+    {
+      pv = (pv * 1.8f) + 32.0f;
+      raw = (raw * 1.8f) + 32.0f;
+    }
+    mix(static_cast<uint32_t>(toScaled10_(pv)));
+    if (state_.io_test_page != 0u)
+    {
+      mix(static_cast<uint32_t>(toScaled10_(raw)));
+    }
+  }
+
+  state_.io_test_last_update_ms = now;
+  if (sig == state_.io_test_last_sig)
+  {
+    return;
+  }
+  state_.io_test_last_sig = sig;
+  renderIoTest_();
+}
+#endif // ENABLE_SERVICE_IO_TEST
+
+#if ENABLE_SERVICE_MEMORY_INFO
+void AppStateMachine::renderMemoryInfo_()
+{
+  const uint32_t now = millis();
+  if (state_.service_mem_last_update_ms != 0u &&
+      (now - state_.service_mem_last_update_ms) < kMemoryInfoRefreshMs)
+  {
+    return;
+  }
+  state_.service_mem_last_update_ms = now;
+
+  if (state_.service_mem_page == 0u)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print(F("MEMORY INFO"));
+    lcdPadSpacesToEol_(lcd, 11u);
+
+#if defined(ESP32)
+    const uint32_t sketch_used_b = ESP.getSketchSize();
+    uint32_t sketch_total_b = 0u;
+    const esp_partition_t* const running = esp_ota_get_running_partition();
+    if (running != nullptr)
+    {
+      sketch_total_b = running->size;
+    }
+    if (sketch_total_b == 0u)
+    {
+      // Fallback: use Arduino helper. This may not match the app partition size on all partition schemes.
+      sketch_total_b = sketch_used_b + ESP.getFreeSketchSpace();
+    }
+
+    const uint16_t flash_used_k = static_cast<uint16_t>((sketch_used_b + 512u) / 1024u);
+    const uint16_t flash_total_k = static_cast<uint16_t>((sketch_total_b + 512u) / 1024u);
+
+    const uint32_t heap_total_b = ESP.getHeapSize();
+    const uint32_t heap_free_b = ESP.getFreeHeap();
+    const uint32_t heap_used_b = heap_total_b - heap_free_b;
+    const uint16_t heap_used_k = static_cast<uint16_t>((heap_used_b + 512u) / 1024u);
+    const uint16_t heap_total_k = static_cast<uint16_t>((heap_total_b + 512u) / 1024u);
+
+    const uint16_t eep_used_b = EEPROMStore::reservedBytes();
+    const uint16_t eep_total_b = EEPROMStore::totalBytes();
+
+    constexpr uint8_t kWarnPct = 85u;
+
+    uint8_t flash_pct = 0u;
+    if (sketch_total_b != 0u)
+    {
+      const uint64_t num = static_cast<uint64_t>(sketch_used_b) * 100ull + (static_cast<uint64_t>(sketch_total_b) / 2ull);
+      flash_pct = static_cast<uint8_t>(num / static_cast<uint64_t>(sketch_total_b));
+    }
+    if (flash_pct > 99u)
+      flash_pct = 99u;
+
+    uint8_t heap_pct = 0u;
+    if (heap_total_b != 0u)
+    {
+      const uint64_t num = static_cast<uint64_t>(heap_used_b) * 100ull + (static_cast<uint64_t>(heap_total_b) / 2ull);
+      heap_pct = static_cast<uint8_t>(num / static_cast<uint64_t>(heap_total_b));
+    }
+    if (heap_pct > 99u)
+      heap_pct = 99u;
+
+    uint8_t eep_pct = 0u;
+    if (eep_total_b != 0u)
+    {
+      const uint32_t num = static_cast<uint32_t>(eep_used_b) * 100u + (eep_total_b / 2u);
+      eep_pct = static_cast<uint8_t>(num / eep_total_b);
+    }
+    if (eep_pct > 99u)
+      eep_pct = 99u;
+
+    const bool warn_flash = flash_pct > kWarnPct;
+    const bool warn_heap = heap_pct > kWarnPct;
+    const bool warn_eep = eep_pct > kWarnPct;
+
+    if (warn_flash || warn_heap || warn_eep)
+    {
+      lcd.setCursor(19, 0);
+      lcd.print('!');
+    }
+#else
+    const uint16_t flash_used_k = 0u;
+    const uint16_t flash_total_k = 0u;
+    const uint16_t heap_used_k = 0u;
+    const uint16_t heap_total_k = 0u;
+    const uint16_t eep_used_b = EEPROMStore::reservedBytes();
+    const uint16_t eep_total_b = EEPROMStore::totalBytes();
+    const uint8_t flash_pct = 0u;
+    const uint8_t heap_pct = 0u;
+    const uint8_t eep_pct = 0u;
+    const bool warn_flash = false;
+    const bool warn_heap = false;
+    const bool warn_eep = false;
+#endif
+
+    lcd.setCursor(0, 1);
+    lcd.print(F("FLASH:"));
+    lcdPrintU16_NoLeading_(lcd, flash_used_k);
+    lcd.print('/');
+    lcdPrintU16_NoLeading_(lcd, flash_total_k);
+    lcd.print('K');
+    lcd.print(warn_flash ? '!' : ' ');
+    lcdPrintU16_NoLeading_(lcd, flash_pct);
+    lcd.print('%');
+    lcdPadSpacesToEol_(
+        lcd, static_cast<uint8_t>(10u + digitsU16_(flash_used_k) + digitsU16_(flash_total_k) + digitsU16_(flash_pct)));
+
+    lcd.setCursor(0, 2);
+    lcd.print(F("HEAP:"));
+    lcdPrintU16_NoLeading_(lcd, heap_used_k);
+    lcd.print('/');
+    lcdPrintU16_NoLeading_(lcd, heap_total_k);
+    lcd.print('K');
+    lcd.print(warn_heap ? '!' : ' ');
+    lcdPrintU16_NoLeading_(lcd, heap_pct);
+    lcd.print('%');
+    lcdPadSpacesToEol_(
+        lcd, static_cast<uint8_t>(9u + digitsU16_(heap_used_k) + digitsU16_(heap_total_k) + digitsU16_(heap_pct)));
+
+    lcd.setCursor(0, 3);
+    lcd.print(F("EEP:"));
+    lcdPrintU16_NoLeading_(lcd, eep_used_b);
+    lcd.print('/');
+    lcdPrintU16_NoLeading_(lcd, eep_total_b);
+    lcd.print('B');
+    lcd.print(warn_eep ? '!' : ' ');
+    lcdPrintU16_NoLeading_(lcd, eep_pct);
+    lcd.print('%');
+    lcdPadSpacesToEol_(lcd,
+                       static_cast<uint8_t>(8u + digitsU16_(eep_used_b) + digitsU16_(eep_total_b) + digitsU16_(eep_pct)));
+    return;
+  }
+
+  // Page 1: firmware/build identifiers.
+  lcd.setCursor(0, 0);
+  lcd.print(F("FIRMWARE INFO"));
+  lcdPadSpacesToEol_(lcd, 13u);
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("FW:"));
+  lcd.print(reinterpret_cast<const __FlashStringHelper*>(FW_VERSION));
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(3u + strlen_P(FW_VERSION)));
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("BUILD:"));
+  lcd.print(reinterpret_cast<const __FlashStringHelper*>(BUILD_DATE));
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(6u + strlen_P(BUILD_DATE)));
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("TIME:"));
+  lcd.print(reinterpret_cast<const __FlashStringHelper*>(BUILD_TIME));
+  lcdPadSpacesToEol_(lcd, static_cast<uint8_t>(5u + strlen_P(BUILD_TIME)));
+}
+#endif // ENABLE_SERVICE_MEMORY_INFO
 
 #if ENABLE_SERVICE_FOPDT_ID
 void AppStateMachine::renderFopdt_()
@@ -2644,6 +3770,21 @@ void AppStateMachine::update()
   {
     updateRunningHeatUi_();
   }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::RUNNING_COOLDOWN)
+  {
+    updateRunningCooldownUi_();
+  }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::PAUSED)
+  {
+    updatePausedUi_();
+  }
+
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::ANTI_CREASE)
+  {
+    updateAntiCreaseUi_();
+  }
 #endif
 
 #if ENABLE_SERVICE_MENU
@@ -2668,6 +3809,22 @@ void AppStateMachine::update()
       state_.service_view == kServiceViewPidView)
   {
     updatePidView_();
+  }
+#endif
+
+#if ENABLE_SERVICE_IO_TEST
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewIoTest)
+  {
+    updateIoTestUi_();
+  }
+#endif
+
+#if ENABLE_SERVICE_MEMORY_INFO
+  if (state_.invalid_key_until_ms == 0u && state_.current_state == SystemState::SERVICE &&
+      state_.service_view == kServiceViewMemoryInfo)
+  {
+    renderMemoryInfo_();
   }
 #endif
 
@@ -2757,6 +3914,17 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
           g_fopdt_active = 0u;
           heaterControl.disable();
           state_.service_fopdt_page = 0u;
+        }
+#endif
+#if ENABLE_SERVICE_IO_TEST
+        if (state_.service_view == kServiceViewIoTest)
+        {
+          state_.io_test_out_mask = 0u;
+          heaterControl.setDutyCycle(0.0f);
+          heaterControl.disable();
+          drumControl.stop();
+          io.emergencyStop();
+          state_.io_test_last_update_ms = 0u;
         }
 #endif
         state_.service_view = kServiceViewMenu;
@@ -2869,10 +4037,49 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
       }
     }
 
-    if (state_.current_state == SystemState::START_DELAY || state_.current_state == SystemState::RUNNING_HEAT ||
-        state_.current_state == SystemState::RUNNING_COOLDOWN)
+    if (state_.current_state == SystemState::PAUSED)
     {
+      // Req 12A/12B: B in PAUSED aborts to main menu.
       transitionTo(SystemState::IDLE);
+      return;
+    }
+
+    if (state_.current_state == SystemState::ANTI_CREASE)
+    {
+      // Anti-crease exit (Req 11.7).
+      drumControl.stop();
+      transitionTo(SystemState::IDLE);
+      return;
+    }
+
+    if (state_.current_state == SystemState::START_DELAY)
+    {
+      // Before cycle starts, STOP aborts directly.
+      transitionTo(SystemState::IDLE);
+      return;
+    }
+
+    if (state_.current_state == SystemState::RUNNING_HEAT)
+    {
+      if (state_.cycle_edit_active != 0u)
+      {
+        // Cancel in-cycle edit and return to running screen.
+        state_.cycle_edit_active = 0u;
+        renderRunningHeat_();
+        state_.cycle_last_ui_ms = 0u;
+        updateRunningHeatUi_();
+        return;
+      }
+
+      // Req 12A/12B: B during cycle pauses.
+      transitionTo(SystemState::PAUSED);
+      return;
+    }
+
+    if (state_.current_state == SystemState::RUNNING_COOLDOWN)
+    {
+      // Req 26: B during cooldown pauses.
+      transitionTo(SystemState::PAUSED);
       return;
     }
 #endif
@@ -3228,6 +4435,185 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
     showInvalidKey_();
     return;
   }
+
+  case SystemState::PAUSED:
+  {
+    if (state_.pause_timeout_shown != 0u)
+    {
+      // Ignored while showing timeout message.
+      return;
+    }
+
+    if (key == KeypadInput::Key::START)
+    {
+      const uint32_t pause_ms = now - state_.pause_start_ms;
+      if (state_.paused_from_state == SystemState::RUNNING_HEAT)
+      {
+        state_.heat_pause_total_ms += pause_ms;
+      }
+      else if (state_.paused_from_state == SystemState::RUNNING_COOLDOWN)
+      {
+        state_.cooldown_pause_total_ms += pause_ms;
+      }
+
+      transitionTo(state_.paused_from_state);
+      return;
+    }
+
+    showInvalidKey_();
+    return;
+  }
+
+  case SystemState::RUNNING_HEAT:
+  {
+    // In-cycle edit mode (Req 13 / Phase 11.4).
+    if (state_.cycle_edit_active != 0u)
+    {
+      if (key == KeypadInput::Key::KEY_STAR)
+      {
+        // Cancel edit without applying.
+        state_.cycle_edit_active = 0u;
+        renderRunningHeat_();
+        state_.cycle_last_ui_ms = 0u;
+        updateRunningHeatUi_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::LEFT || key == KeypadInput::Key::RIGHT)
+      {
+        state_.cycle_edit_field ^= 1u;
+        renderCycleEdit_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::UP || key == KeypadInput::Key::DOWN)
+      {
+        const bool inc = (key == KeypadInput::Key::UP);
+
+        if (state_.cycle_edit_field == 0u)
+        {
+          // TEMP limits: ±10C around original setpoint, clamped to global MIN/MAX.
+          uint8_t min_c = (state_.cycle_orig_setpoint_c > 10u)
+                              ? static_cast<uint8_t>(state_.cycle_orig_setpoint_c - 10u)
+                              : 0u;
+          uint8_t max_c = static_cast<uint8_t>(state_.cycle_orig_setpoint_c + 10u);
+          if (min_c < MIN_TEMP)
+            min_c = MIN_TEMP;
+          if (max_c > MAX_TEMP)
+            max_c = MAX_TEMP;
+
+          uint8_t t_c = state_.cycle_edit_temp_c;
+#if ENABLE_SETTINGS_MENU
+          if (getTempUnit_() == kTempUnitF)
+          {
+            const uint8_t min_f = cToF_u8(min_c);
+            const uint8_t max_f = cToF_u8(max_c);
+            uint8_t t_f = cToF_u8(t_c);
+            if (inc)
+            {
+              t_f = (t_f >= max_f) ? max_f : static_cast<uint8_t>(t_f + 5u);
+            }
+            else
+            {
+              t_f = (t_f <= min_f) ? min_f : static_cast<uint8_t>(t_f - 5u);
+            }
+            t_c = fToC_u8(t_f);
+            if (t_c < min_c)
+              t_c = min_c;
+            if (t_c > max_c)
+              t_c = max_c;
+          }
+          else
+#endif
+          {
+            if (inc)
+            {
+              t_c = (t_c >= max_c) ? max_c : static_cast<uint8_t>(t_c + 5u);
+            }
+            else
+            {
+              t_c = (t_c <= min_c) ? min_c : static_cast<uint8_t>(t_c - 5u);
+            }
+          }
+          state_.cycle_edit_temp_c = t_c;
+        }
+        else
+        {
+          // TIME limits: ±20 min around original duration.
+          uint8_t min_m = (state_.cycle_orig_duration_min > 20u)
+                              ? static_cast<uint8_t>(state_.cycle_orig_duration_min - 20u)
+                              : 0u;
+          uint8_t max_m = static_cast<uint8_t>(state_.cycle_orig_duration_min + 20u);
+          if (min_m < 10u)
+            min_m = 10u;
+          if (max_m > 120u)
+            max_m = 120u;
+
+          uint8_t m = state_.cycle_edit_duration_min;
+          if (inc)
+          {
+            m = (m >= max_m) ? max_m : static_cast<uint8_t>(m + 5u);
+          }
+          else
+          {
+            m = (m <= min_m) ? min_m : static_cast<uint8_t>(m - 5u);
+          }
+          state_.cycle_edit_duration_min = m;
+        }
+
+        renderCycleEdit_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::OK)
+      {
+        // Apply edits (temporary, not persisted).
+        state_.cycle_setpoint_c = state_.cycle_edit_temp_c;
+        state_.cycle_duration_min = state_.cycle_edit_duration_min;
+
+        state_.cycle_temp_modified = (state_.cycle_setpoint_c != state_.cycle_orig_setpoint_c) ? 1u : 0u;
+        state_.cycle_time_modified = (state_.cycle_duration_min != state_.cycle_orig_duration_min) ? 1u : 0u;
+
+        pidController.setSetpoint(static_cast<float>(state_.cycle_setpoint_c));
+
+        state_.cycle_edit_active = 0u;
+        renderRunningHeat_();
+        state_.cycle_last_ui_ms = 0u;
+        updateRunningHeatUi_();
+        return;
+      }
+
+      showInvalidKey_();
+      return;
+    }
+
+    if (key == KeypadInput::Key::KEY_STAR)
+    {
+      state_.cycle_edit_active = 1u;
+      state_.cycle_edit_field = 0u;
+      state_.cycle_edit_temp_c = state_.cycle_setpoint_c;
+      state_.cycle_edit_duration_min = state_.cycle_duration_min;
+      renderCycleEdit_();
+      return;
+    }
+
+    showInvalidKey_();
+    return;
+  }
+
+  case SystemState::RUNNING_COOLDOWN:
+    showInvalidKey_();
+    return;
+
+  case SystemState::ANTI_CREASE:
+    if (state_.anticrease_page == 0u)
+    {
+      // Cycle complete summary: any key returns to IDLE (Req 12A/12B).
+      transitionTo(SystemState::IDLE);
+      return;
+    }
+    showInvalidKey_();
+    return;
 #endif
 
 #if ENABLE_SETTINGS_MENU
@@ -3551,6 +4937,144 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
     }
 #endif
 
+#if ENABLE_SERVICE_IO_TEST
+    if (state_.service_view == kServiceViewIoTest)
+    {
+      // Page toggle.
+      if (key == KeypadInput::Key::LEFT || key == KeypadInput::Key::RIGHT)
+      {
+        state_.io_test_page ^= 1u;
+        state_.io_test_last_update_ms = 0u;
+        updateIoTestUi_();
+        return;
+      }
+
+      if (state_.io_test_page != 0u)
+      {
+        showInvalidKey_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::UP)
+      {
+        state_.io_test_selection =
+            (state_.io_test_selection == 0u) ? static_cast<uint8_t>(kIoOutputCount - 1u)
+                                             : static_cast<uint8_t>(state_.io_test_selection - 1u);
+        state_.io_test_last_update_ms = 0u;
+        updateIoTestUi_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::DOWN)
+      {
+        state_.io_test_selection = static_cast<uint8_t>((state_.io_test_selection + 1u) % kIoOutputCount);
+        state_.io_test_last_update_ms = 0u;
+        updateIoTestUi_();
+        return;
+      }
+
+      if (key == KeypadInput::Key::OK)
+      {
+        if (!io.isDoorClosed())
+        {
+          state_.invalid_key_until_ms = now + kInvalidKeyMsgMs;
+          lcd.setCursor(0, 3);
+          lcd.print(F("CLOSE DOOR          "));
+          return;
+        }
+
+        uint8_t mask = state_.io_test_out_mask;
+        const uint8_t sel = (state_.io_test_selection >= kIoOutputCount) ? 0u : state_.io_test_selection;
+
+        if (sel == 0u)
+        {
+          // Heater: ON=100% duty, OFF=disabled. HeaterControl enforces interlocks.
+          mask ^= kIoMaskHeater;
+          state_.io_test_out_mask = mask;
+
+          if ((mask & kIoMaskHeater) != 0u)
+          {
+            heaterControl.setDutyCycle(100.0f);
+            heaterControl.enable();
+          }
+          else
+          {
+            heaterControl.setDutyCycle(0.0f);
+            heaterControl.disable();
+          }
+
+          state_.io_test_last_update_ms = 0u;
+          updateIoTestUi_();
+          return;
+        }
+
+        if (sel == 1u)
+        {
+          // Motor forward: enforce mutual exclusion with reverse.
+          const bool on = (mask & kIoMaskMotorFwd) != 0u;
+          if (on)
+          {
+            mask &= static_cast<uint8_t>(~kIoMaskMotorFwd);
+          }
+          else
+          {
+            mask |= kIoMaskMotorFwd;
+            mask &= static_cast<uint8_t>(~kIoMaskMotorRev);
+          }
+          state_.io_test_out_mask = mask;
+          state_.io_test_last_update_ms = 0u;
+          updateIoTestUi_();
+          return;
+        }
+
+        if (sel == 2u)
+        {
+          // Motor reverse: enforce mutual exclusion with forward.
+          const bool on = (mask & kIoMaskMotorRev) != 0u;
+          if (on)
+          {
+            mask &= static_cast<uint8_t>(~kIoMaskMotorRev);
+          }
+          else
+          {
+            mask |= kIoMaskMotorRev;
+            mask &= static_cast<uint8_t>(~kIoMaskMotorFwd);
+          }
+          state_.io_test_out_mask = mask;
+          state_.io_test_last_update_ms = 0u;
+          updateIoTestUi_();
+          return;
+        }
+
+        // AUX relay toggle (reserved).
+        mask ^= kIoMaskAux;
+        state_.io_test_out_mask = mask;
+        state_.io_test_last_update_ms = 0u;
+        updateIoTestUi_();
+        return;
+      }
+
+      showInvalidKey_();
+      return;
+    }
+#endif
+
+#if ENABLE_SERVICE_MEMORY_INFO
+    if (state_.service_view == kServiceViewMemoryInfo)
+    {
+      if (key == KeypadInput::Key::OK || key == KeypadInput::Key::LEFT || key == KeypadInput::Key::RIGHT)
+      {
+        state_.service_mem_page ^= 1u;
+        state_.service_mem_last_update_ms = 0u;
+        renderMemoryInfo_();
+        return;
+      }
+
+      showInvalidKey_();
+      return;
+    }
+#endif
+
 #if ENABLE_SERVICE_FAULT_HISTORY
     if (state_.service_view == kServiceViewFaultHistory)
     {
@@ -3850,7 +5374,33 @@ void AppStateMachine::handleKeyPress(KeypadInput::Key key)
 #endif
 #if ENABLE_SERVICE_IO_TEST
       case ServiceItem::IO_TEST:
+        // Ensure other service tools are inactive.
+        drumControl.stop();
+#if ENABLE_SERVICE_HEATER_TEST
+        g_heater_test_active = 0u;
+        state_.heater_test_duty = 0u;
+#endif
+#if ENABLE_SERVICE_FOPDT_ID
+        g_fopdt_active = 0u;
+        fopdt.abort();
+#endif
+        heaterControl.setDutyCycle(0.0f);
+        heaterControl.disable();
+        io.emergencyStop();
+
+        state_.io_test_page = 0u;
+        state_.io_test_selection = 0u;
+        state_.io_test_out_mask = 0u;
+        state_.io_test_last_update_ms = 0u;
         state_.service_view = kServiceViewIoTest;
+        renderService_();
+        return;
+#endif
+#if ENABLE_SERVICE_MEMORY_INFO
+      case ServiceItem::MEMORY_INFO:
+        state_.service_mem_page = 0u;
+        state_.service_mem_last_update_ms = 0u;
+        state_.service_view = kServiceViewMemoryInfo;
         renderService_();
         return;
 #endif

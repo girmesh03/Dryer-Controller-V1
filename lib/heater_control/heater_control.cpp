@@ -151,6 +151,11 @@ bool HeaterControl::canEnergizeHeater_() const {
 #else
   const bool in_fopdt = false;
 #endif
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_IO_TEST
+  const bool in_io_test = app.isIoTestActive();
+#else
+  const bool in_io_test = false;
+#endif
   const bool in_running_heat = (st == SystemState::RUNNING_HEAT);
 #if ENABLE_SERVICE_MENU && ENABLE_SERVICE_AUTOTUNE
   const bool in_autotune = (st == SystemState::AUTOTUNE);
@@ -158,7 +163,7 @@ bool HeaterControl::canEnergizeHeater_() const {
   const bool in_autotune = false;
 #endif
 
-  if (!in_heater_test && !in_fopdt && !in_running_heat && !in_autotune) {
+  if (!in_heater_test && !in_fopdt && !in_io_test && !in_running_heat && !in_autotune) {
     return false;
   }
 

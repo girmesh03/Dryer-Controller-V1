@@ -7,12 +7,14 @@
 #include "config_build.h"
 #include "ds18b20_sensor.h"
 #include "eeprom_store.h"
+#include "drum_control.h"
 #include "heater_control.h"
 #include "io_abstraction.h"
 #include "pid_control.h"
 
 extern IOAbstraction io;
 extern DS18B20Sensor tempSensor;
+extern DrumControl drumControl;
 extern HeaterControl heaterControl;
 extern PIDControl pidController;
 extern EEPROMStore eepromStore;
@@ -211,8 +213,41 @@ void FaultManager::update() {
     return;
   }
 
-  // Door open -> FAULT (Requirement 1 / Phase 10.2).
-  if (!io.isDoorClosed()) {
+  const SystemState st = app.getCurrentState();
+
+  // Door open -> FAULT only during operation (Design: Safety State Prioritization).
+  // Anti-crease exit is handled by the App (ANTI_CREASE -> IDLE).
+  bool door_fault_active = false;
+  switch (st) {
+    case SystemState::START_DELAY:
+    case SystemState::RUNNING_HEAT:
+    case SystemState::RUNNING_COOLDOWN:
+    case SystemState::PAUSED:
+    case SystemState::AUTOTUNE:
+      door_fault_active = true;
+      break;
+#if ENABLE_SERVICE_MENU
+    case SystemState::SERVICE:
+      // Only treat SERVICE as operational when a tool is actively driving outputs.
+      door_fault_active = heaterControl.isHeaterOn() || drumControl.isRunning();
+#if ENABLE_SERVICE_MENU && ENABLE_SERVICE_IO_TEST
+      if (app.isIoTestActive()) {
+        bool h = false;
+        bool f = false;
+        bool r = false;
+        bool a = false;
+        app.getIoTestOutputs(h, f, r, a);
+        door_fault_active = door_fault_active || h || f || r || a;
+      }
+#endif
+      break;
+#endif
+    default:
+      door_fault_active = false;
+      break;
+  }
+
+  if (door_fault_active && !io.isDoorClosed()) {
     setFault(FaultCode::DOOR_OPEN);
     return;
   }
@@ -224,7 +259,6 @@ void FaultManager::update() {
   }
 
   // Temperature-dependent faults require a valid sensor.
-  const SystemState st = app.getCurrentState();
   const bool sensor_ok = tempSensor.isValid();
   if (!sensor_ok) {
     if (state_.sensor_invalid_start_ms == 0u) {
