@@ -101,11 +101,18 @@ bool IOAbstraction::verifyOutputState(uint8_t pin, bool expected) {
 }
 
 void IOAbstraction::emergencyStop() {
+  const uint32_t now = millis();
+
   digitalWrite(PIN_HEATER_RELAY, kRelayOffLevel);
   digitalWrite(PIN_MOTOR_FWD_RELAY, kRelayOffLevel);
   digitalWrite(PIN_MOTOR_REV_RELAY, kRelayOffLevel);
   digitalWrite(PIN_AUX_RELAY, kRelayOffLevel);
   noTone(PIN_BUZZER);
+
+  if (state_.motor_fwd_state != 0u || state_.motor_rev_state != 0u) {
+    // Enforce dead-time after any forced motor shutdown (break-before-make).
+    state_.last_direction_change_ms = now;
+  }
 
   state_.heater_state = 0;
   state_.motor_fwd_state = 0;
@@ -128,6 +135,10 @@ void IOAbstraction::setHeaterRelay(bool state) {
 
 void IOAbstraction::setMotorForward(bool state) {
   if (!state || !isDoorClosed()) {
+    if (state_.motor_fwd_state != 0u) {
+      // Enforce dead-time after any motor OFF transition.
+      state_.last_direction_change_ms = millis();
+    }
     digitalWrite(PIN_MOTOR_FWD_RELAY, kRelayOffLevel);
     state_.motor_fwd_state = 0;
     (void)verifyOutputState(PIN_MOTOR_FWD_RELAY, false);
@@ -157,6 +168,10 @@ void IOAbstraction::setMotorForward(bool state) {
 
 void IOAbstraction::setMotorReverse(bool state) {
   if (!state || !isDoorClosed()) {
+    if (state_.motor_rev_state != 0u) {
+      // Enforce dead-time after any motor OFF transition.
+      state_.last_direction_change_ms = millis();
+    }
     digitalWrite(PIN_MOTOR_REV_RELAY, kRelayOffLevel);
     state_.motor_rev_state = 0;
     (void)verifyOutputState(PIN_MOTOR_REV_RELAY, false);

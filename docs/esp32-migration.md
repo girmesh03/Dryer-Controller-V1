@@ -57,13 +57,16 @@ Relays are treated as **active-LOW** in firmware:
 
 #### LCD reliability note (ESP32 + PCF8574 backpacks)
 
-In this project, a “missing first character” symptom (e.g. `AULT HISTORY`) was traced primarily to a **firmware LCD line wrap** issue: some screens padded with an off-by-one count, which caused an extra character to wrap around and overwrite column `(0,0)`.
+Some LCD backpacks + the `LiquidCrystal_I2C` driver can exhibit a “missing first character” symptom on specific screens (e.g. `FAULT HISTORY` showing as `AULT HISTORY`).
 
-Phase 11 fixes the affected screens by correcting padding so no line ever prints past 20 columns.
+Mitigations used in this project:
+- Prefer **partial updates** and avoid repeated `lcd.clear()` in service tools (prevents flicker and reduces edge-case writes).
+- Carefully **pad lines** so writes do not wrap past 20 columns.
 
-If you still see missing characters:
+If you still see missing characters (screen-specific):
 - Verify the LCD backpack is powered correctly (3.3V-safe I2C pull-ups; avoid 5V pull-ups into ESP32).
 - Verify SDA/SCL wiring is short and solid, with a common ground.
+- As a temporary workaround, printing a leading space before a header can “shift” the visible text if the first character is intermittently dropped by the LCD/backpack.
 
 ## EEPROM on ESP32
 
@@ -72,6 +75,7 @@ ESP32 uses **flash-emulated EEPROM**. `EEPROMStore::init()` calls `EEPROM.begin(
 Notes:
 - The current CRC-protected reserved map uses the first **512 bytes** (Appendix D / `design.md`).
 - The remaining bytes are intentionally left unused for future phases.
+- If EEPROM CRC validation fails at boot and an auto factory-reset occurs, the boot screen shows `EEPROM RESET`.
 
 ## Watchdog / Reset Cause
 
@@ -93,3 +97,5 @@ Notes:
 
 - DS18B20 data pull-up: add **4.7k** from `PIN_TEMP_SENSOR` to **3.3V**.
 - Relay inputs: if your relay board does not already include input pull-ups, add **10k pull-up** to **3.3V** on each relay input to keep relays **OFF** at boot (active-LOW).
+
+For the full wiring/pin assignment table, see `docs/wiring-esp32.md`.

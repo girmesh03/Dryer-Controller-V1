@@ -18,8 +18,8 @@ This document summarizes what was implemented in **Phase 11** and how it integra
 - `START_DELAY` (1s): shows “STARTING…” then enters `RUNNING_HEAT`.
 - `RUNNING_HEAT` running screen (1 Hz refresh):
   - Line 1: `AUTO: <PROGRAM>` or `MANUAL MODE`
-  - Line 2: `SP:xxx[*] PV:xxx °C/°F` (`*` if SP was modified in-cycle)
-  - Line 3: `TIME: mmm:ss[*]` (`*` if duration modified in-cycle)
+  - Line 2: `SP:xxx PV:xxx °C/°F`
+  - Line 3: `TIME: mmm:ss`
   - Line 4: `HFR` indicators + `B:PAUSE`
 - `RUNNING_COOLDOWN` screen:
   - Heater is forced OFF, drum continues with the active pattern.
@@ -86,10 +86,10 @@ This document summarizes what was implemented in **Phase 11** and how it integra
   - Heater: PID computes only in `RUNNING_HEAT`, drives `heaterControl`, then `io.setHeaterRelay(heaterControl.isHeaterOn())`
 - Door-open fault gating was refined so `ANTI_CREASE` exits to IDLE without latching a fault (the App handles it), while operational states still latch door faults.
 
-## LCD Rendering Reliability Fix
+## LCD Rendering Note (ESP32)
 
-- Multiple LCD “missing first character” issues were traced to **line padding off-by-one** that caused a wrap-around write into column `(0,0)`.
-- Phase 11 corrected those padding counts on affected screens (e.g., Program Editor list and Fault History view) to prevent unintended wrapping.
+- Some LCD backpacks + the `LiquidCrystal_I2C` driver can still show a **missing first character** on specific headers (e.g. `FAULT HISTORY` → `AULT HISTORY`) depending on timing/write patterns.
+- Service tools in Phase 11 avoid repeated `lcd.clear()` and reduce unnecessary LCD writes to improve overall stability, but the remaining header-drop symptom is tracked as a follow-up.
 
 ## Hardware Checkpoint (User Action)
 

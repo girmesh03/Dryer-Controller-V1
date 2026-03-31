@@ -47,6 +47,7 @@ public:
   void update();               // Convenience wrapper
 
   bool isValid() const;
+  bool wasFactoryResetThisBoot() const;
 
   // Settings
   bool loadSettings(Settings& settings) const;
@@ -122,6 +123,7 @@ private:
   static constexpr uint8_t FLAG_PENDING_PROGRAM = 1u << 2;
   static constexpr uint8_t FLAG_PENDING_PID = 1u << 3;
   static constexpr uint8_t FLAG_PENDING_FOPDT = 1u << 4;
+  static constexpr uint8_t FLAG_INIT_FACTORY_RESET = 1u << 5;
 
   void setFlag(uint8_t flag, bool value);
   bool getFlag(uint8_t flag) const;

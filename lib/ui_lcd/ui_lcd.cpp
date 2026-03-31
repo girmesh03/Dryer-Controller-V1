@@ -3,6 +3,9 @@
 #include <Arduino.h>
 
 #include "config_build.h"
+#include "eeprom_store.h"
+
+extern EEPROMStore eepromStore;
 
 namespace
 {
@@ -266,7 +269,14 @@ void UILCD::renderBoot_()
   }
 
   setCursor(0, 2);
-  lcd_.print(F("Self-Test: PASS"));
+  if (eepromStore.wasFactoryResetThisBoot())
+  {
+    lcd_.print(F("EEPROM RESET"));
+  }
+  else
+  {
+    lcd_.print(F("Self-Test: PASS"));
+  }
 
   setCursor(0, 3);
   if ((g_reset_cause_flags & 0x01u) != 0u)

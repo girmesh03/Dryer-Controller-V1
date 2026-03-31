@@ -1310,12 +1310,6 @@ void AppStateMachine::renderAutoParamReview_()
   lcd.print(unit_char);
 
   uint8_t col = static_cast<uint8_t>(6u + ((t_disp >= 100u) ? 3u : ((t_disp >= 10u) ? 2u : 1u)) + 2u);
-  if ((state_.auto_flags & kAutoFlagTempModified) != 0u)
-  {
-    lcd.print(' ');
-    lcd.print('*');
-    col = static_cast<uint8_t>(col + 2u);
-  }
   lcdPadSpacesToEol_(lcd, col);
 
   // Line 3: TIME
@@ -1324,12 +1318,6 @@ void AppStateMachine::renderAutoParamReview_()
   lcdPrintU16_NoLeading_(lcd, state_.auto_duration_min);
   lcd.print(F(" MIN"));
   col = static_cast<uint8_t>(6u + ((state_.auto_duration_min >= 100u) ? 3u : 2u) + 4u);
-  if ((state_.auto_flags & kAutoFlagTimeModified) != 0u)
-  {
-    lcd.print(' ');
-    lcd.print('*');
-    col = static_cast<uint8_t>(col + 2u);
-  }
   lcdPadSpacesToEol_(lcd, col);
 
   // Line 4: Actions
@@ -1590,16 +1578,12 @@ void AppStateMachine::updateRunningHeatUi_()
   lcd.setCursor(0, 1);
   lcd.print(F("SP:"));
   lcdPrintU16_3_(lcd, sp_disp);
-  if (state_.cycle_temp_modified != 0u)
-  {
-    lcd.print('*');
-  }
   lcd.print(F(" PV:"));
   lcdPrintU16_3_(lcd, pv_disp);
   lcd.print(' ');
   lcd.print(static_cast<char>(0xDF));
   lcd.print(unit_char);
-  lcdPadSpacesToEol_(lcd, (state_.cycle_temp_modified != 0u) ? 17u : 16u);
+  lcdPadSpacesToEol_(lcd, 16u);
 
   // Line 3: TIME
   lcd.setCursor(0, 2);
@@ -1607,7 +1591,7 @@ void AppStateMachine::updateRunningHeatUi_()
   lcdPrintU16_3_(lcd, rem_min);
   lcd.print(':');
   lcdPrintU8_2_(lcd, rem_sec);
-  lcd.print(state_.cycle_time_modified ? '*' : ' ');
+  lcd.print(' ');
   lcdPadSpacesToEol_(lcd, 13u);
 
   // Line 4: status flags (Req 12A/12B.41/.50)

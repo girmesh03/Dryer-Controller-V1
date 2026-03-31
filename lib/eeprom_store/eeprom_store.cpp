@@ -89,6 +89,10 @@ bool EEPROMStore::isValid() const {
   return getFlag(FLAG_VALID);
 }
 
+bool EEPROMStore::wasFactoryResetThisBoot() const {
+  return getFlag(FLAG_INIT_FACTORY_RESET);
+}
+
 void EEPROMStore::writeBytes(uint16_t addr, const uint8_t* data, uint8_t len) {
   for (uint8_t i = 0; i < len; i++) {
     eepromWrite8IfChanged(static_cast<uint16_t>(addr + i), data[i]);
@@ -227,6 +231,7 @@ void EEPROMStore::factoryReset() {
 void EEPROMStore::init() {
   state_.last_write_ms = 0;
   state_.flags = 0;
+  setFlag(FLAG_INIT_FACTORY_RESET, false);
 
 #if defined(ESP32)
   // ESP32 EEPROM is flash-emulated and must be initialized with a size.
@@ -259,6 +264,7 @@ void EEPROMStore::init() {
   const bool ok = (magic == MAGIC_DR) && (version == VERSION) && (stored_crc == computed_crc);
   if (!ok) {
     factoryReset();
+    setFlag(FLAG_INIT_FACTORY_RESET, true);
     return;
   }
 
