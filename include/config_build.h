@@ -101,7 +101,7 @@ constexpr uint8_t MAX_TEMP = 85;
 
 // Timing constants
 constexpr uint8_t DEBOUNCE_TIME_MS = 50;
-constexpr uint16_t MOTOR_DIRECTION_DELAY_MS = 2000;
+constexpr uint16_t MOTOR_DIRECTION_DELAY_MS = 7000;
 constexpr uint8_t HEATER_MIN_ON_TIME_S = 10;
 constexpr uint8_t HEATER_MIN_OFF_TIME_S = 10;
 constexpr uint16_t WATCHDOG_TIMEOUT_MS = 2000;
